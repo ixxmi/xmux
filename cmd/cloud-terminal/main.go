@@ -71,6 +71,28 @@ func main() {
 	if mode == "agent" {
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
+
+		srv := gateway.NewServer(gateway.Options{
+			Runtime:            nil,
+			StaticFS:           cloudterminal.WebFS(),
+			Config:             store,
+			EdgeID:             cfg.Edge.ID,
+			EdgeName:           cfg.Edge.Name,
+			WorkbenchStatePath: cfg.Server.WorkbenchStatePath,
+			Logger:             logger,
+		})
+		httpServer := &http.Server{
+			Addr:              cfg.Server.Addr,
+			Handler:           srv.Routes(),
+			ReadHeaderTimeout: 5 * time.Second,
+		}
+		go func() {
+			logger.Info("agent admin listening", "addr", cfg.Server.Addr, "edge_id", cfg.Edge.ID)
+			if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				logger.Error("admin server failed", "error", err)
+			}
+		}()
+
 		agent := agent.New(agent.Options{
 			DiscoveryURL: cloudTunnel.DiscoveryURL,
 			GatewayURL:   cloudTunnel.GatewayURL,
@@ -82,10 +104,22 @@ func main() {
 			EdgeName:     cfg.Edge.Name,
 			Logger:       logger,
 		})
-		if err := agent.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
-			logger.Error("agent failed", "error", err)
-			os.Exit(1)
+		agentErr := make(chan error, 1)
+		go func() {
+			agentErr <- agent.Run(ctx)
+		}()
+
+		select {
+		case <-ctx.Done():
+		case err := <-agentErr:
+			if err != nil && !errors.Is(err, context.Canceled) {
+				logger.Error("agent failed", "error", err)
+			}
 		}
+
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = httpServer.Shutdown(shutdownCtx)
 		return
 	}
 

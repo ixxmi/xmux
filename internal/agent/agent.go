@@ -98,15 +98,6 @@ func New(opts Options) *Agent {
 }
 
 func (a *Agent) Run(ctx context.Context) error {
-	if a.discoveryURL == "" && a.gatewayURL == "" {
-		return errors.New("discovery_url or gateway_url is required")
-	}
-	if a.username == "" {
-		return errors.New("cloud account username is required")
-	}
-	if a.sessionID == "" {
-		return errors.New("cloud account session is required")
-	}
 	if a.runtime == nil || a.config == nil {
 		return errors.New("runtime and config are required")
 	}
@@ -126,19 +117,26 @@ func (a *Agent) Run(ctx context.Context) error {
 }
 
 func (a *Agent) runOnce(ctx context.Context) error {
-	gatewayURL, tunnelPath, err := a.resolveGatewayURL(ctx)
+	username, sessionID, discoveryURL, gatewayURL := a.tunnelInputs()
+	if discoveryURL == "" && gatewayURL == "" {
+		return errors.New("discovery_url or gateway_url is not configured")
+	}
+	if username == "" || sessionID == "" {
+		return errors.New("cloud account is not bound; open the local admin and click 使用当前用户")
+	}
+	resolvedURL, tunnelPath, err := a.resolveGatewayURL(ctx, discoveryURL, gatewayURL)
 	if err != nil {
 		return err
 	}
-	wsURL, err := tunnelURL(gatewayURL, tunnelPath)
+	wsURL, err := tunnelURL(resolvedURL, tunnelPath)
 	if err != nil {
 		return err
 	}
 	header := http.Header{}
-	header.Set("Authorization", basicAuth(a.username, a.sessionID))
-	conn, _, err := websocket.DefaultDialer.DialContext(ctx, wsURL, header)
+	header.Set("Authorization", basicAuth(username, sessionID))
+	conn, resp, err := websocket.DefaultDialer.DialContext(ctx, wsURL, header)
 	if err != nil {
-		return err
+		return describeDialError(wsURL, resp, err)
 	}
 	defer conn.Close()
 
@@ -152,7 +150,7 @@ func (a *Agent) runOnce(ctx context.Context) error {
 			return err
 		}
 		if env.Type == "hello_ack" {
-			a.logger.Info("agent tunnel connected", "gateway", gatewayURL, "edge_id", a.edgeID)
+			a.logger.Info("agent tunnel connected", "gateway", resolvedURL, "edge_id", a.edgeID)
 			break
 		}
 		if env.Type == "error" {
@@ -169,26 +167,47 @@ func (a *Agent) runOnce(ctx context.Context) error {
 	}
 }
 
-func (a *Agent) resolveGatewayURL(ctx context.Context) (string, string, error) {
-	discovery := strings.TrimSpace(a.discoveryURL)
-	if discovery == "" {
-		return a.gatewayURL, "", nil
+func (a *Agent) tunnelInputs() (string, string, string, string) {
+	cfg := a.config.Snapshot()
+	username := strings.TrimSpace(cfg.CloudTunnel.Account)
+	sessionID := strings.TrimSpace(cfg.CloudTunnel.SessionID)
+	if username == "" {
+		username = a.username
 	}
-	gatewayURL, tunnelPath, err := fetchDiscovery(ctx, discovery)
+	if sessionID == "" {
+		sessionID = a.sessionID
+	}
+	discovery := strings.TrimSpace(cfg.CloudTunnel.DiscoveryURL)
+	if discovery == "" {
+		discovery = a.discoveryURL
+	}
+	gateway := strings.TrimSpace(cfg.CloudTunnel.GatewayURL)
+	if gateway == "" {
+		gateway = a.gatewayURL
+	}
+	return username, sessionID, discovery, gateway
+}
+
+func (a *Agent) resolveGatewayURL(ctx context.Context, discoveryURL string, gatewayURL string) (string, string, error) {
+	discovery := strings.TrimSpace(discoveryURL)
+	if discovery == "" {
+		return gatewayURL, "", nil
+	}
+	resolved, tunnelPath, err := fetchDiscovery(ctx, discovery)
 	if err != nil {
-		if a.gatewayURL != "" {
+		if gatewayURL != "" {
 			a.logger.Warn("discovery failed, falling back to gateway_url", "error", err)
-			return a.gatewayURL, "", nil
+			return gatewayURL, "", nil
 		}
 		return "", "", fmt.Errorf("discovery %s failed: %w", discovery, err)
 	}
-	if strings.TrimSpace(gatewayURL) == "" {
-		if a.gatewayURL != "" {
-			return a.gatewayURL, tunnelPath, nil
+	if strings.TrimSpace(resolved) == "" {
+		if gatewayURL != "" {
+			return gatewayURL, tunnelPath, nil
 		}
 		return "", "", fmt.Errorf("discovery %s returned empty gateway_url", discovery)
 	}
-	return gatewayURL, tunnelPath, nil
+	return resolved, tunnelPath, nil
 }
 
 func fetchDiscovery(ctx context.Context, discoveryURL string) (string, string, error) {
@@ -764,6 +783,40 @@ func tunnelURL(base string, tunnelPath string) (string, error) {
 func basicAuth(username string, sessionID string) string {
 	value := base64.StdEncoding.EncodeToString([]byte(username + ":" + sessionID))
 	return "Basic " + value
+}
+
+func describeDialError(wsURL string, resp *http.Response, err error) error {
+	if resp == nil {
+		return fmt.Errorf("dial %s: %w", wsURL, err)
+	}
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+	resp.Body.Close()
+	snippet := strings.TrimSpace(string(body))
+	if len(snippet) > 240 {
+		snippet = snippet[:240] + "..."
+	}
+	hint := dialErrorHint(resp.StatusCode)
+	if snippet == "" {
+		return fmt.Errorf("dial %s: HTTP %d (%s)%s: %w", wsURL, resp.StatusCode, http.StatusText(resp.StatusCode), hint, err)
+	}
+	return fmt.Errorf("dial %s: HTTP %d (%s)%s body=%q: %w", wsURL, resp.StatusCode, http.StatusText(resp.StatusCode), hint, snippet, err)
+}
+
+func dialErrorHint(status int) string {
+	switch status {
+	case http.StatusUnauthorized:
+		return " — session 失效或账号未绑定，请到管理后台重新点击「使用当前用户」保存"
+	case http.StatusForbidden:
+		return " — 当前账号未开启本地穿透，或 Origin 被云端 allow_hosts 拒绝"
+	case http.StatusNotFound:
+		return " — gateway 路径不对，确认 discovery_url/gateway_url 指向真正的云端入口"
+	case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return " — 反向代理（Nginx）与上游连接异常，检查 Upgrade 头转发"
+	}
+	if status >= 500 {
+		return " — 云端 5xx，检查云端日志"
+	}
+	return ""
 }
 
 func pathAllowed(path string, roots []string) bool {

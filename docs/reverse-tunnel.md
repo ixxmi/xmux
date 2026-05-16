@@ -137,6 +137,8 @@ policy:
 
 Agent 只读取管理员在后台访问控制里保存到 `cloud_tunnel.discovery_url`（或兼容字段 `cloud_tunnel.gateway_url`）的地址；其他账号直接复用这份配置。Agent 启动时先 `GET ${discovery_url}/cloud-terminal-api/discovery/gateway` 拿到真正的网关地址，再建立 WSS 反向隧道；当 discovery 不可达时回退到本地配置的 `gateway_url`。
 
+Agent 模式同时会在 `server.addr`（默认 `127.0.0.1:18001`）启动本地管理页面，浏览器访问 `http://127.0.0.1:18001/admin/` 即可用 `server.admin_username/admin_password` 登录，修改 `discovery_url`、策略、允许路径等配置无须重启进程；运行时配置会被反向隧道实时使用。
+
 推荐本地 `agent.yaml`：
 
 ```yaml
