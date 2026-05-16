@@ -72,14 +72,15 @@ func main() {
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
 		agent := agent.New(agent.Options{
-			GatewayURL: cloudTunnel.GatewayURL,
-			Username:   cloudTunnel.Account,
-			SessionID:  cloudTunnel.SessionID,
-			Runtime:    runtime,
-			Config:     store,
-			EdgeID:     cfg.Edge.ID,
-			EdgeName:   cfg.Edge.Name,
-			Logger:     logger,
+			DiscoveryURL: cloudTunnel.DiscoveryURL,
+			GatewayURL:   cloudTunnel.GatewayURL,
+			Username:     cloudTunnel.Account,
+			SessionID:    cloudTunnel.SessionID,
+			Runtime:      runtime,
+			Config:       store,
+			EdgeID:       cfg.Edge.ID,
+			EdgeName:     cfg.Edge.Name,
+			Logger:       logger,
 		})
 		if err := agent.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 			logger.Error("agent failed", "error", err)

@@ -79,7 +79,8 @@
               <label>Database path<input id="databasePath" readonly /></label>
               <h2>本地穿透</h2>
               <label class="check standalone"><input id="cloudTunnelEnabled" type="checkbox" /> 本地端启动后连接云端</label>
-              <label>Cloud gateway URL<input id="cloudGatewayURL" placeholder="https://cloud.example.com:5955" /></label>
+              <label>Discovery URL<input id="cloudDiscoveryURL" placeholder="https://cloud.example.com:5955" /></label>
+              <label>Gateway URL（可选回退）<input id="cloudGatewayURL" placeholder="为空时由 Discovery 返回" /></label>
               <div class="account-list-head">
                 <span id="cloudTunnelAccount">未绑定账号</span>
                 <button id="bindTunnelAccount" class="secondary" type="button">使用当前用户</button>

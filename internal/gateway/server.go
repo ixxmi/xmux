@@ -120,6 +120,7 @@ func NewServer(opts Options) *Server {
 func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/cloud-terminal-api/health", s.health)
+	mux.HandleFunc("/cloud-terminal-api/discovery/gateway", s.discoveryGateway)
 	mux.HandleFunc("/cloud-terminal-api/edge", s.withAuth(s.edgeInfo))
 	mux.HandleFunc("/cloud-terminal-api/complete", s.withAuth(s.complete))
 	mux.HandleFunc("/cloud-terminal-api/accounts/register", s.accountRegister)
@@ -165,6 +166,44 @@ func (s *Server) serveRoot(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (s *Server) discoveryGateway(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", "GET")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	cfg := s.config.Snapshot()
+	gatewayURL := strings.TrimSpace(cfg.CloudTunnel.GatewayURL)
+	if gatewayURL == "" {
+		gatewayURL = inferGatewayURL(r)
+	}
+	writeJSON(w, http.StatusOK, map[string]string{
+		"gateway_url": gatewayURL,
+		"tunnel_path": "/cloud-terminal-api/tunnel/agent",
+	})
+}
+
+func inferGatewayURL(r *http.Request) string {
+	scheme := "http"
+	if r.TLS != nil {
+		scheme = "https"
+	}
+	if forwarded := strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")); forwarded != "" {
+		if idx := strings.Index(forwarded, ","); idx >= 0 {
+			forwarded = forwarded[:idx]
+		}
+		scheme = strings.TrimSpace(forwarded)
+	}
+	host := strings.TrimSpace(r.Header.Get("X-Forwarded-Host"))
+	if host == "" {
+		host = r.Host
+	}
+	if host == "" {
+		return ""
+	}
+	return scheme + "://" + host
 }
 
 func (s *Server) handleTunnelSessionMessage(msg workbenchServerMessage) {
@@ -1207,6 +1246,7 @@ type adminConfigPayload struct {
 
 type adminCloudTunnelPayload struct {
 	Enabled           bool   `json:"enabled"`
+	DiscoveryURL      string `json:"discovery_url"`
 	GatewayURL        string `json:"gateway_url"`
 	Account           string `json:"account"`
 	Bound             bool   `json:"bound"`
@@ -1239,10 +1279,11 @@ func adminConfigFromConfig(cfg config.Config) adminConfigPayload {
 		AccountStorePath:           cfg.Server.AccountStorePath,
 		AccountRegistrationEnabled: cfg.Server.RegistrationEnabled(),
 		CloudTunnel: adminCloudTunnelPayload{
-			Enabled:    cfg.CloudTunnel.Enabled,
-			GatewayURL: cfg.CloudTunnel.GatewayURL,
-			Account:    cfg.CloudTunnel.Account,
-			Bound:      strings.TrimSpace(cfg.CloudTunnel.Account) != "" && strings.TrimSpace(cfg.CloudTunnel.SessionID) != "",
+			Enabled:      cfg.CloudTunnel.Enabled,
+			DiscoveryURL: cfg.CloudTunnel.DiscoveryURL,
+			GatewayURL:   cfg.CloudTunnel.GatewayURL,
+			Account:      cfg.CloudTunnel.Account,
+			Bound:        strings.TrimSpace(cfg.CloudTunnel.Account) != "" && strings.TrimSpace(cfg.CloudTunnel.SessionID) != "",
 		},
 		AllowHosts:       slices.Clone(cfg.Server.AllowHosts),
 		AdminIPAllowlist: slices.Clone(cfg.Server.AdminIPAllowlist),
@@ -1259,6 +1300,7 @@ func (p adminConfigPayload) Apply(cfg config.Config) config.Config {
 	registrationEnabled := p.AccountRegistrationEnabled
 	cfg.Server.AccountRegistrationEnabled = &registrationEnabled
 	cfg.CloudTunnel.Enabled = p.CloudTunnel.Enabled
+	cfg.CloudTunnel.DiscoveryURL = strings.TrimSpace(p.CloudTunnel.DiscoveryURL)
 	cfg.CloudTunnel.GatewayURL = strings.TrimSpace(p.CloudTunnel.GatewayURL)
 	cfg.Server.AllowHosts = cleanList(p.AllowHosts)
 	cfg.Server.AdminIPAllowlist = cleanList(p.AdminIPAllowlist)

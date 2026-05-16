@@ -72,10 +72,11 @@ type ServerConfig struct {
 }
 
 type CloudTunnelConfig struct {
-	Enabled    bool   `yaml:"enabled"`
-	GatewayURL string `yaml:"gateway_url"`
-	Account    string `yaml:"account,omitempty"`
-	SessionID  string `yaml:"session_id,omitempty"`
+	Enabled      bool   `yaml:"enabled"`
+	DiscoveryURL string `yaml:"discovery_url,omitempty"`
+	GatewayURL   string `yaml:"gateway_url,omitempty"`
+	Account      string `yaml:"account,omitempty"`
+	SessionID    string `yaml:"session_id,omitempty"`
 }
 
 type EdgeConfig struct {

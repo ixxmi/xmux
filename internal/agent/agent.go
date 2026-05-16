@@ -3,8 +3,10 @@ package agent
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -25,25 +27,27 @@ import (
 )
 
 type Options struct {
-	GatewayURL string
-	Username   string
-	SessionID  string
-	Runtime    *edge.Runtime
-	Config     *config.Store
-	EdgeID     string
-	EdgeName   string
-	Logger     *slog.Logger
+	DiscoveryURL string
+	GatewayURL   string
+	Username     string
+	SessionID    string
+	Runtime      *edge.Runtime
+	Config       *config.Store
+	EdgeID       string
+	EdgeName     string
+	Logger       *slog.Logger
 }
 
 type Agent struct {
-	gatewayURL string
-	username   string
-	sessionID  string
-	runtime    *edge.Runtime
-	config     *config.Store
-	edgeID     string
-	edgeName   string
-	logger     *slog.Logger
+	discoveryURL string
+	gatewayURL   string
+	username     string
+	sessionID    string
+	runtime      *edge.Runtime
+	config       *config.Store
+	edgeID       string
+	edgeName     string
+	logger       *slog.Logger
 
 	mu       sync.Mutex
 	sessions map[string]*edge.InteractiveSession
@@ -77,24 +81,25 @@ func New(opts Options) *Agent {
 		opts.Logger = slog.Default()
 	}
 	return &Agent{
-		gatewayURL: strings.TrimSpace(opts.GatewayURL),
-		username:   strings.TrimSpace(opts.Username),
-		sessionID:  strings.TrimSpace(opts.SessionID),
-		runtime:    opts.Runtime,
-		config:     opts.Config,
-		edgeID:     firstNonEmpty(opts.EdgeID, "local-edge"),
-		edgeName:   firstNonEmpty(opts.EdgeName, "Local Edge"),
-		logger:     opts.Logger,
-		sessions:   make(map[string]*edge.InteractiveSession),
-		decoders:   make(map[string]*gateway.UTF8StreamDecoder),
-		outputs:    make(map[string]func(gateway.TunnelEnvelope) error),
-		meta:       make(map[string]agentSessionMeta),
+		discoveryURL: strings.TrimSpace(opts.DiscoveryURL),
+		gatewayURL:   strings.TrimSpace(opts.GatewayURL),
+		username:     strings.TrimSpace(opts.Username),
+		sessionID:    strings.TrimSpace(opts.SessionID),
+		runtime:      opts.Runtime,
+		config:       opts.Config,
+		edgeID:       firstNonEmpty(opts.EdgeID, "local-edge"),
+		edgeName:     firstNonEmpty(opts.EdgeName, "Local Edge"),
+		logger:       opts.Logger,
+		sessions:     make(map[string]*edge.InteractiveSession),
+		decoders:     make(map[string]*gateway.UTF8StreamDecoder),
+		outputs:      make(map[string]func(gateway.TunnelEnvelope) error),
+		meta:         make(map[string]agentSessionMeta),
 	}
 }
 
 func (a *Agent) Run(ctx context.Context) error {
-	if a.gatewayURL == "" {
-		return errors.New("gateway url is required")
+	if a.discoveryURL == "" && a.gatewayURL == "" {
+		return errors.New("discovery_url or gateway_url is required")
 	}
 	if a.username == "" {
 		return errors.New("cloud account username is required")
@@ -121,7 +126,11 @@ func (a *Agent) Run(ctx context.Context) error {
 }
 
 func (a *Agent) runOnce(ctx context.Context) error {
-	wsURL, err := tunnelURL(a.gatewayURL)
+	gatewayURL, tunnelPath, err := a.resolveGatewayURL(ctx)
+	if err != nil {
+		return err
+	}
+	wsURL, err := tunnelURL(gatewayURL, tunnelPath)
 	if err != nil {
 		return err
 	}
@@ -143,7 +152,7 @@ func (a *Agent) runOnce(ctx context.Context) error {
 			return err
 		}
 		if env.Type == "hello_ack" {
-			a.logger.Info("agent tunnel connected", "gateway", a.gatewayURL, "edge_id", a.edgeID)
+			a.logger.Info("agent tunnel connected", "gateway", gatewayURL, "edge_id", a.edgeID)
 			break
 		}
 		if env.Type == "error" {
@@ -158,6 +167,75 @@ func (a *Agent) runOnce(ctx context.Context) error {
 		}
 		go a.handle(ctx, client, env)
 	}
+}
+
+func (a *Agent) resolveGatewayURL(ctx context.Context) (string, string, error) {
+	discovery := strings.TrimSpace(a.discoveryURL)
+	if discovery == "" {
+		return a.gatewayURL, "", nil
+	}
+	gatewayURL, tunnelPath, err := fetchDiscovery(ctx, discovery)
+	if err != nil {
+		if a.gatewayURL != "" {
+			a.logger.Warn("discovery failed, falling back to gateway_url", "error", err)
+			return a.gatewayURL, "", nil
+		}
+		return "", "", fmt.Errorf("discovery %s failed: %w", discovery, err)
+	}
+	if strings.TrimSpace(gatewayURL) == "" {
+		if a.gatewayURL != "" {
+			return a.gatewayURL, tunnelPath, nil
+		}
+		return "", "", fmt.Errorf("discovery %s returned empty gateway_url", discovery)
+	}
+	return gatewayURL, tunnelPath, nil
+}
+
+func fetchDiscovery(ctx context.Context, discoveryURL string) (string, string, error) {
+	endpoint, err := discoveryEndpoint(discoveryURL)
+	if err != nil {
+		return "", "", err
+	}
+	reqCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return "", "", err
+	}
+	req.Header.Set("Accept", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return "", "", fmt.Errorf("status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var payload struct {
+		GatewayURL string `json:"gateway_url"`
+		TunnelPath string `json:"tunnel_path"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&payload); err != nil {
+		return "", "", err
+	}
+	return strings.TrimSpace(payload.GatewayURL), strings.TrimSpace(payload.TunnelPath), nil
+}
+
+func discoveryEndpoint(base string) (string, error) {
+	u, err := url.Parse(base)
+	if err != nil {
+		return "", err
+	}
+	if u.Scheme == "" || u.Host == "" {
+		return "", fmt.Errorf("invalid discovery url %q", base)
+	}
+	if !strings.HasSuffix(u.Path, "/cloud-terminal-api/discovery/gateway") {
+		u.Path = strings.TrimRight(u.Path, "/") + "/cloud-terminal-api/discovery/gateway"
+	}
+	u.RawQuery = ""
+	u.Fragment = ""
+	return u.String(), nil
 }
 
 func (a *Agent) hello() gateway.TunnelHello {
@@ -662,7 +740,7 @@ func mustRaw(value any) gateway.JSONRawEnvelope {
 	return raw
 }
 
-func tunnelURL(base string) (string, error) {
+func tunnelURL(base string, tunnelPath string) (string, error) {
 	u, err := url.Parse(base)
 	if err != nil {
 		return "", err
@@ -672,7 +750,14 @@ func tunnelURL(base string) (string, error) {
 	} else if u.Scheme == "https" {
 		u.Scheme = "wss"
 	}
-	u.Path = strings.TrimRight(u.Path, "/") + "/cloud-terminal-api/tunnel/agent"
+	path := strings.TrimSpace(tunnelPath)
+	if path == "" {
+		path = "/cloud-terminal-api/tunnel/agent"
+	}
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	u.Path = strings.TrimRight(u.Path, "/") + path
 	return u.String(), nil
 }
 

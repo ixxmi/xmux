@@ -135,7 +135,7 @@ policy:
 ./cloud-terminal -mode agent -config agent.yaml
 ```
 
-Agent 只读取管理员在后台访问控制里保存到 `cloud_tunnel.gateway_url` 的网关地址；其他账号直接复用这份配置。
+Agent 只读取管理员在后台访问控制里保存到 `cloud_tunnel.discovery_url`（或兼容字段 `cloud_tunnel.gateway_url`）的地址；其他账号直接复用这份配置。Agent 启动时先 `GET ${discovery_url}/cloud-terminal-api/discovery/gateway` 拿到真正的网关地址，再建立 WSS 反向隧道；当 discovery 不可达时回退到本地配置的 `gateway_url`。
 
 推荐本地 `agent.yaml`：
 
@@ -156,7 +156,7 @@ server:
 
 cloud_tunnel:
   enabled: true
-  gateway_url: "https://ess-ds.com:5955"
+  discovery_url: "https://ess-ds.com:5955"
 
 edge:
   id: "macbook-pro"

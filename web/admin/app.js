@@ -15,6 +15,7 @@ const els = {
   refreshAccounts: document.getElementById("refreshAccounts"),
   accountList: document.getElementById("accountList"),
   cloudTunnelEnabled: document.getElementById("cloudTunnelEnabled"),
+  cloudDiscoveryURL: document.getElementById("cloudDiscoveryURL"),
   cloudGatewayURL: document.getElementById("cloudGatewayURL"),
   cloudTunnelAccount: document.getElementById("cloudTunnelAccount"),
   bindTunnelAccount: document.getElementById("bindTunnelAccount"),
@@ -113,6 +114,7 @@ document.addEventListener("keydown", (event) => {
 [
   els.accountRegistrationEnabled,
   els.cloudTunnelEnabled,
+  els.cloudDiscoveryURL,
   els.cloudGatewayURL,
   els.allowHosts,
   els.adminIPs,
@@ -274,6 +276,7 @@ function renderConfig() {
   els.databasePath.value = state.config.database_path || "";
   els.accountRegistrationEnabled.checked = Boolean(state.config.account_registration_enabled);
   els.cloudTunnelEnabled.checked = Boolean(state.config.cloud_tunnel?.enabled);
+  els.cloudDiscoveryURL.value = state.config.cloud_tunnel?.discovery_url || "";
   els.cloudGatewayURL.value = state.config.cloud_tunnel?.gateway_url || "";
   els.cloudTunnelAccount.textContent = state.config.cloud_tunnel?.bound ? `已绑定：${state.config.cloud_tunnel.account}` : "未绑定账号";
   els.allowHosts.value = lines(state.config.allow_hosts);
@@ -354,6 +357,7 @@ function collectConfig() {
     account_registration_enabled: els.accountRegistrationEnabled.checked,
     cloud_tunnel: {
       enabled: els.cloudTunnelEnabled.checked,
+      discovery_url: els.cloudDiscoveryURL.value.trim(),
       gateway_url: els.cloudGatewayURL.value.trim(),
       use_current_account: Boolean(state.bindTunnelAccount)
     },
