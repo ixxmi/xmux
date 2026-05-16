@@ -1,0 +1,190 @@
+:root {
+  color-scheme: dark;
+  --bg: #0d1014;
+  --panel: #171c22;
+  --line: #303945;
+  --text: #eef2f5;
+  --muted: #a7b1bd;
+  --accent: #39c6a3;
+  --accent-2: #f2c14e;
+  --danger: #ff6b6b;
+  --shadow: 0 18px 60px rgba(0, 0, 0, 0.32);
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background:
+    linear-gradient(120deg, rgba(57, 198, 163, 0.12), transparent 36%),
+    linear-gradient(180deg, #11161c 0%, var(--bg) 100%);
+  color: var(--text);
+}
+
+button,
+input {
+  font: inherit;
+}
+
+.app {
+  width: min(1180px, calc(100vw - 28px));
+  min-height: 100vh;
+  margin: 0 auto;
+  padding: 22px 0;
+  display: flex;
+}
+
+.terminal-shell {
+  flex: 1;
+  min-height: calc(100vh - 44px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(23, 28, 34, 0.92);
+  box-shadow: var(--shadow);
+}
+
+.terminal-header {
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 14px;
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.traffic {
+  display: flex;
+  gap: 7px;
+}
+
+.traffic span {
+  width: 11px;
+  height: 11px;
+  border-radius: 999px;
+  background: #ff5f57;
+}
+
+.traffic span:nth-child(2) {
+  background: #ffbd2e;
+}
+
+.traffic span:nth-child(3) {
+  background: #28c840;
+}
+
+.auth-panel {
+  width: min(520px, calc(100% - 32px));
+  margin: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.auth-panel.hidden {
+  display: none;
+}
+
+.auth-panel label {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.token-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
+.token-row input {
+  width: 100%;
+  min-height: 44px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 0 12px;
+  background: #0f1419;
+  color: var(--text);
+  outline: none;
+}
+
+.token-row input:focus {
+  border-color: var(--accent);
+}
+
+.token-row button {
+  min-height: 44px;
+  border: 1px solid rgba(57, 198, 163, 0.34);
+  border-radius: 6px;
+  padding: 0 16px;
+  background: rgba(57, 198, 163, 0.16);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.token-row button:hover {
+  background: rgba(57, 198, 163, 0.24);
+}
+
+.token-row button:disabled,
+.token-row input:disabled {
+  cursor: wait;
+  opacity: 0.62;
+}
+
+.auth-message {
+  min-height: 22px;
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.auth-message.error {
+  color: var(--danger);
+}
+
+.auth-message.ok {
+  color: var(--accent);
+}
+
+.terminal {
+  flex: 1;
+  min-height: 0;
+  padding: 10px;
+}
+
+.xterm {
+  height: 100%;
+}
+
+.xterm-viewport {
+  border-radius: 4px;
+}
+
+@media (max-width: 640px) {
+  .app {
+    width: min(100vw - 20px, 760px);
+    padding: 10px 0;
+  }
+
+  .terminal-shell {
+    min-height: calc(100vh - 20px);
+  }
+
+  .token-row {
+    grid-template-columns: 1fr;
+  }
+
+  .token-row button {
+    width: 100%;
+  }
+}

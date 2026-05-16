@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Cloud Terminal</title>
+    <link rel="stylesheet" href="/vendor/xterm.css" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="app">
+      <section class="terminal-shell" aria-label="Cloud terminal">
+        <div class="terminal-header">
+          <div class="traffic" aria-hidden="true">
+            <span></span><span></span><span></span>
+          </div>
+          <span id="sessionInfo">Token required</span>
+        </div>
+
+        <form id="authPanel" class="auth-panel">
+          <label for="tokenInput">Access token</label>
+          <div class="token-row">
+            <input id="tokenInput" name="access-token" type="password" autocomplete="off" placeholder="Enter token" />
+            <button type="submit">Connect</button>
+          </div>
+          <p id="authMessage" class="auth-message">Authenticate before opening the terminal session.</p>
+        </form>
+
+        <div id="terminal" class="terminal" hidden></div>
+      </section>
+    </main>
+
+    <script src="/vendor/xterm.js"></script>
+    <script src="/vendor/addon-fit.js"></script>
+    <script src="/app.js"></script>
+  </body>
+</html>

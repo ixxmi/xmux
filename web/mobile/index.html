@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>AI Mobile Workbench</title>
+    <link rel="stylesheet" href="/vendor/xterm.css" />
+    <link rel="stylesheet" href="/mobile/styles.css" />
+  </head>
+  <body>
+    <main class="mobile-app">
+      <section id="authView" class="auth-view">
+        <form id="authForm" class="auth-box">
+          <div class="auth-mark">AI</div>
+          <h1>AI Remote</h1>
+          <p>连接电脑上的 AI CLI 会话</p>
+          <label for="tokenInput">Access token</label>
+          <input id="tokenInput" type="password" autocomplete="off" placeholder="输入终端鉴权 token" />
+          <button type="submit">Connect</button>
+          <span id="authMessage" class="auth-message"></span>
+        </form>
+      </section>
+
+      <section id="workbenchView" class="workbench-view" hidden>
+        <header class="topbar">
+          <button id="processButton" class="collapse-button" type="button" aria-label="Toggle sessions" title="Sessions">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M4 6h16M4 12h16M4 18h16"></path>
+            </svg>
+          </button>
+          <div class="connection">
+            <strong>AI Remote</strong>
+            <span id="connectionState">Disconnected</span>
+          </div>
+          <div class="top-actions">
+            <button id="menuButton" class="icon-button" type="button" aria-label="Actions" title="Actions">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <circle cx="12" cy="5" r="1.8"></circle>
+                <circle cx="12" cy="12" r="1.8"></circle>
+                <circle cx="12" cy="19" r="1.8"></circle>
+              </svg>
+            </button>
+            <div id="actionMenu" class="action-menu" hidden>
+              <button id="newSessionButton" type="button">New</button>
+              <button id="reconnectButton" type="button">Reconnect</button>
+              <button id="stopSessionButton" class="danger-action" type="button">Stop</button>
+            </div>
+          </div>
+        </header>
+
+        <section class="workspace-strip" hidden>
+          <button id="sessionButton" class="session-pill" type="button">No session</button>
+          <span id="workspacePath"></span>
+        </section>
+
+        <div id="processBackdrop" class="process-backdrop" hidden></div>
+        <section id="processPanel" class="process-panel" hidden>
+          <div class="process-head">
+            <div>
+              <span>进程与文件夹</span>
+              <strong id="processSummary">0 running</strong>
+            </div>
+            <button id="addFolderButton" class="tool-icon-button" type="button" aria-label="Choose folder" title="选择文件夹">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M3 7a2 2 0 0 1 2-2h4.4l2 2H19a2 2 0 0 1 2 2v7.5a2.5 2.5 0 0 1-2.5 2.5h-13A2.5 2.5 0 0 1 3 16.5V7Z"></path>
+                <path d="M12 11v5M9.5 13.5h5"></path>
+              </svg>
+            </button>
+          </div>
+          <div id="folderPicker" class="folder-picker" hidden>
+            <div class="folder-picker-head">
+              <button id="folderBackButton" class="tool-icon-button" type="button" aria-label="Back" title="返回">
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="m15 18-6-6 6-6"></path>
+                </svg>
+              </button>
+              <strong id="folderPickerPath">选择目录</strong>
+            </div>
+            <div id="folderPickerList" class="folder-picker-list"></div>
+          </div>
+          <div id="processList" class="process-list"></div>
+        </section>
+
+        <section id="targetView" class="target-view">
+          <div class="target-header">
+            <div>
+              <strong>选择启动位置</strong>
+              <span id="targetHint">只能选择允许访问路径内的目录或文件</span>
+            </div>
+            <button id="startAgentButton" type="button" disabled>Start</button>
+          </div>
+          <div id="agentSelector" class="agent-selector" aria-label="选择 AI CLI"></div>
+          <div class="target-picker">
+            <div class="target-toolbar">
+              <button id="targetParentButton" class="ghost" type="button">Up</button>
+              <button id="targetRefreshButton" class="ghost" type="button">Refresh</button>
+            </div>
+            <div id="targetCurrentPath" class="current-path"></div>
+            <div id="targetSelection" class="target-selection">尚未选择</div>
+            <div id="targetFileList" class="file-list"></div>
+          </div>
+        </section>
+
+        <section id="terminalPage" class="tab-page active" data-page="terminal" hidden>
+          <div id="terminal" class="terminal"></div>
+          <div id="keybar" class="keybar" aria-label="Terminal shortcuts" hidden>
+            <button type="button" data-key="esc">Esc</button>
+            <button type="button" data-key="tab">Tab</button>
+            <button type="button" data-key="up">↑</button>
+            <button type="button" data-key="down">↓</button>
+            <button type="button" data-key="left">←</button>
+            <button type="button" data-key="right">→</button>
+            <button type="button" data-key="ctrl-c">Ctrl C</button>
+            <button type="button" data-key="ctrl-d">Ctrl D</button>
+          </div>
+        </section>
+
+        <section class="tab-page" data-page="files">
+          <div class="file-toolbar">
+            <button id="parentButton" class="ghost" type="button">Up</button>
+            <button id="refreshFilesButton" class="ghost" type="button">Refresh</button>
+          </div>
+          <div id="currentPath" class="current-path"></div>
+          <div id="fileList" class="file-list"></div>
+          <article id="fileViewer" class="file-viewer" hidden>
+            <div class="viewer-head">
+              <strong id="viewerTitle">File</strong>
+              <button id="fileDiffButton" class="ghost" type="button">Diff</button>
+            </div>
+            <pre id="fileContent"></pre>
+          </article>
+        </section>
+
+        <section class="tab-page" data-page="diff">
+          <div class="diff-toolbar">
+            <button id="refreshDiffButton" class="ghost" type="button">Refresh</button>
+            <span id="diffScope">Workspace diff</span>
+          </div>
+          <pre id="diffOutput" class="diff-output"></pre>
+        </section>
+
+        <section class="tab-page" data-page="preview">
+          <div class="preview-toolbar">
+            <select id="previewPort"></select>
+            <button id="openPreviewButton" class="ghost" type="button">Open</button>
+            <button id="refreshPreviewButton" class="ghost" type="button">Refresh</button>
+          </div>
+          <iframe id="previewFrame" title="Local preview"></iframe>
+        </section>
+
+        <nav id="bottomTabs" class="bottom-tabs" aria-label="Workbench sections" hidden>
+          <button class="active" type="button" data-tab="terminal">Terminal</button>
+          <button type="button" data-tab="files">Files</button>
+          <button type="button" data-tab="diff">Diff</button>
+          <button type="button" data-tab="preview">Preview</button>
+        </nav>
+      </section>
+    </main>
+
+    <script src="/vendor/xterm.js"></script>
+    <script src="/vendor/addon-fit.js"></script>
+    <script src="/mobile/app.js"></script>
+  </body>
+</html>

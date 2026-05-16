@@ -1,0 +1,138 @@
+server:
+    addr: 0.0.0.0:18001
+    auth_token: xuemingyang
+    admin_token: admin-token-change-me
+    audit_log_path: data/audit.jsonl
+    allow_hosts:
+        - 0.0.0.0:18001
+        - localhost:18001
+        - cloud.ess-ds.com:5955
+        - ess-ds.com:5955
+        - 192.168.111.189:5948
+        - 192.168.111.189:18001
+    admin_ip_allowlist:
+        - 127.0.0.1
+        - ::1
+edge:
+    id: local-edge
+    name: Local Developer Edge
+    work_dir: .
+    env:
+        LANG: C.UTF-8
+        TERM: xterm-256color
+    command_timeout: 20s
+    max_output_bytes: 1048576
+    preview_ports:
+        - 3000
+        - 5173
+        - 8080
+policy:
+    deny:
+        - rm
+        - reboot
+        - shutdown
+        - mkfs
+        - dd
+        - chmod
+        - chown
+        - sudo
+        - su
+        - bash
+        - sh
+        - zsh
+        - fish
+        - python
+        - python3
+        - perl
+        - ruby
+        - node
+    allow_paths:
+        - /tmp
+        - /var/log
+        - /Users/xuechenxi/Documents/company/code/openSource/gogo/xterm
+        - /Users/xuechenxi/Documents/company/code
+    commands:
+        cat:
+            enabled: true
+            bin: ""
+            interactive: false
+            subcommands: []
+            max_args: 8
+        cd:
+            enabled: true
+            bin: ""
+            interactive: false
+            subcommands: []
+            max_args: 8
+        claude:
+            enabled: true
+            bin: claude
+            interactive: true
+            subcommands: []
+            max_args: 12
+        clear:
+            enabled: true
+            bin: ""
+            interactive: false
+            subcommands: []
+            max_args: 8
+        codex:
+            enabled: true
+            bin: /opt/homebrew/bin/codex
+            interactive: true
+            subcommands: []
+            max_args: 12
+        date:
+            enabled: true
+            bin: ""
+            interactive: false
+            subcommands: []
+            max_args: 4
+        docker:
+            enabled: false
+            bin: ""
+            interactive: false
+            subcommands:
+                - ps
+                - logs
+                - inspect
+            max_args: 16
+        gemini:
+            enabled: true
+            bin: gemini
+            interactive: true
+            subcommands: []
+            max_args: 12
+        kubectl:
+            enabled: false
+            bin: ""
+            interactive: false
+            subcommands:
+                - get
+                - describe
+                - logs
+            max_args: 16
+        ls:
+            enabled: true
+            bin: ""
+            interactive: false
+            subcommands: []
+            max_args: 8
+        pwd:
+            enabled: true
+            bin: ""
+            interactive: false
+            subcommands: []
+            max_args: 0
+        uname:
+            enabled: true
+            bin: ""
+            interactive: false
+            subcommands: []
+            max_args: 4
+        whoami:
+            enabled: true
+            bin: ""
+            interactive: false
+            subcommands: []
+            max_args: 0

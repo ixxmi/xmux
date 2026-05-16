@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Cloud Terminal Admin</title>
+    <link rel="stylesheet" href="/admin/styles.css" />
+  </head>
+  <body>
+    <main class="admin-layout">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark">CT</div>
+          <div>
+            <span>Cloud Terminal</span>
+            <strong>Admin Console</strong>
+          </div>
+        </div>
+        <nav class="nav">
+          <button class="nav-item active" type="button" data-section="access">访问控制</button>
+          <button class="nav-item" type="button" data-section="commands">命令策略</button>
+          <button class="nav-item" type="button" data-section="paths">文件路径</button>
+        </nav>
+        <div class="sidebar-footer">
+          <span id="saveState">Loaded</span>
+        </div>
+      </aside>
+
+      <section class="content">
+        <header class="content-header">
+          <p id="sectionEyebrow" class="section-eyebrow">访问控制</p>
+          <div class="header-meta">
+            <span>YAML Sync</span>
+            <span>Policy Live</span>
+            <span>IP Guard</span>
+            <button id="saveButton" type="button">Save Changes</button>
+          </div>
+        </header>
+
+        <section class="section active" id="section-access">
+          <div class="section-grid two">
+            <article class="panel">
+              <h2>访问令牌</h2>
+              <label>Terminal token<input id="authToken" type="password" /></label>
+              <label>Admin token<input id="adminToken" type="password" /></label>
+              <label>Tunnel token<input id="tunnelToken" type="password" /></label>
+            </article>
+            <article class="panel">
+              <h2>网络边界</h2>
+              <label>Gateway Origin 白名单<textarea id="allowHosts" rows="6"></textarea></label>
+              <label>后台管理 IP 白名单<textarea id="adminIPs" rows="6" placeholder="127.0.0.1&#10;192.168.1.0/24"></textarea></label>
+            </article>
+          </div>
+        </section>
+
+        <section class="section" id="section-commands">
+          <div class="tabs">
+            <button class="tab active" type="button" data-command-tab="allow">白名单</button>
+            <button class="tab" type="button" data-command-tab="deny">黑名单</button>
+          </div>
+          <div class="command-tab active" id="command-tab-allow">
+            <div class="command-layout">
+              <article class="panel command-list-panel">
+                <div class="panel-toolbar">
+                  <h2>命令白名单</h2>
+                  <button id="addCommand" class="secondary" type="button">Add</button>
+                </div>
+                <div id="commandList" class="command-list"></div>
+              </article>
+
+              <article class="panel command-editor">
+                <div class="panel-toolbar">
+                  <h2 id="commandEditorTitle">选择命令</h2>
+                  <button id="deleteCommand" class="danger" type="button">Delete</button>
+                </div>
+                <div id="emptyCommand" class="empty-state">从左侧选择一个命令进行编辑。</div>
+                <div id="commandForm" class="command-form" hidden>
+                  <label>Command name<input id="cmdName" /></label>
+                  <div class="switch-row">
+                    <label class="check"><input id="cmdEnabled" type="checkbox" /> Enabled</label>
+                    <label class="check"><input id="cmdInteractive" type="checkbox" /> Interactive PTY</label>
+                  </div>
+                  <div class="form-grid">
+                    <label>Binary<input id="cmdBin" /></label>
+                    <label>Max args<input id="cmdMaxArgs" type="number" min="0" /></label>
+                  </div>
+                  <label>Subcommands<textarea id="cmdSubcommands" rows="8"></textarea></label>
+                </div>
+              </article>
+            </div>
+          </div>
+          <div class="command-tab" id="command-tab-deny">
+            <article class="panel deny-panel">
+              <h2>命令黑名单</h2>
+              <textarea id="denyList" rows="18"></textarea>
+            </article>
+          </div>
+        </section>
+
+        <section class="section" id="section-paths">
+          <div class="path-layout">
+            <article class="panel path-browser-panel">
+              <div class="panel-toolbar path-panel-title">
+                <h2>本地文件路径</h2>
+                <span id="fileCount" class="path-count">0 项</span>
+              </div>
+              <div class="pathbar">
+                <button id="rootButton" class="secondary" type="button">Root</button>
+                <button id="upButton" class="secondary" type="button">Up</button>
+                <span id="currentPath"></span>
+              </div>
+              <div id="fileList" class="file-list"></div>
+            </article>
+            <article class="panel">
+              <h2>全局可访问路径</h2>
+              <textarea id="globalAllowPaths" rows="18"></textarea>
+            </article>
+          </div>
+        </section>
+      </section>
+    </main>
+    <script src="/admin/app.js"></script>
+  </body>
+</html>

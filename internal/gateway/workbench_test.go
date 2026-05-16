@@ -1,0 +1,262 @@
+package gateway
+
+import (
+	"log/slog"
+	"net/http"
+	"net/url"
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"cloud-terminal/internal/config"
+	"cloud-terminal/internal/policy"
+)
+
+func TestWorkbenchAuthorizedUsesCookie(t *testing.T) {
+	t.Parallel()
+
+	server := testServer(t, config.Config{
+		Server: config.ServerConfig{AuthToken: "mobile-token", AdminToken: "admin"},
+		Policy: minimalPolicy(),
+	})
+	request := &http.Request{Header: http.Header{}, URL: &url.URL{}}
+	request.AddCookie(&http.Cookie{Name: workbenchCookieName, Value: "mobile-token"})
+
+	if !server.workbenchAuthorized(request) {
+		t.Fatal("expected workbench cookie token to authorize")
+	}
+}
+
+func TestWorkbenchPreviewPortAllowlist(t *testing.T) {
+	t.Parallel()
+
+	server := testServer(t, config.Config{
+		Server: config.ServerConfig{AuthToken: "token", AdminToken: "admin"},
+		Edge:   config.EdgeConfig{PreviewPorts: []int{3000, 5173}},
+		Policy: minimalPolicy(),
+	})
+
+	if !server.previewPortAllowed(3000) {
+		t.Fatal("expected configured preview port to be allowed")
+	}
+	if server.previewPortAllowed(22) {
+		t.Fatal("expected non-configured preview port to be rejected")
+	}
+}
+
+func TestWorkbenchSessionReplayIsBounded(t *testing.T) {
+	t.Parallel()
+
+	session := &workbenchSession{
+		id:          "session",
+		edgeID:      "edge",
+		edgeName:    "Edge",
+		agent:       "codex",
+		startedAt:   time.Now(),
+		lastActive:  time.Now(),
+		running:     true,
+		attachments: map[uint64]func(workbenchServerMessage){},
+	}
+
+	session.appendOutput(make([]byte, workbenchReplayMax+128))
+	snapshot := session.snapshot()
+
+	if len(snapshot.Replay) != workbenchReplayMax {
+		t.Fatalf("replay length = %d, want %d", len(snapshot.Replay), workbenchReplayMax)
+	}
+}
+
+func TestWorkbenchSessionsPersistToDisk(t *testing.T) {
+	t.Parallel()
+
+	statePath := filepath.Join(t.TempDir(), "workbench_sessions.json")
+	startedAt := time.Now().Add(-time.Minute).Truncate(time.Second)
+	lastActive := time.Now().Truncate(time.Second)
+
+	manager := &workbenchManager{
+		edgeID:    "edge",
+		edgeName:  "Edge",
+		statePath: statePath,
+		logger:    slog.Default(),
+		sessions: map[string]*workbenchSession{
+			"session-1": {
+				id:          "session-1",
+				requestID:   "request-1",
+				edgeID:      "edge",
+				edgeName:    "Edge",
+				agent:       "codex",
+				workDir:     "/tmp/project",
+				startedAt:   startedAt,
+				lastActive:  lastActive,
+				running:     false,
+				exitCode:    0,
+				duration:    "1s",
+				replay:      []byte("──ok\n"),
+				attachments: map[uint64]func(workbenchServerMessage){},
+			},
+		},
+	}
+	if err := manager.saveState(); err != nil {
+		t.Fatalf("saveState: %v", err)
+	}
+
+	loaded := &workbenchManager{
+		edgeID:    "edge",
+		edgeName:  "Edge",
+		statePath: statePath,
+		logger:    slog.Default(),
+		sessions:  map[string]*workbenchSession{},
+	}
+	if err := loaded.loadState(); err != nil {
+		t.Fatalf("loadState: %v", err)
+	}
+
+	session := loaded.sessions["session-1"]
+	if session == nil {
+		t.Fatal("expected session to be loaded")
+	}
+	snapshot := session.snapshot()
+	if snapshot.Agent != "codex" || snapshot.WorkDir != "/tmp/project" || snapshot.Replay != "──ok\n" {
+		t.Fatalf("snapshot = %+v", snapshot)
+	}
+	if snapshot.Running {
+		t.Fatal("persisted sessions should load as non-running")
+	}
+}
+
+func TestWorkbenchStateIncludesPreviewPorts(t *testing.T) {
+	t.Parallel()
+
+	server := testServer(t, config.Config{
+		Server: config.ServerConfig{AuthToken: "token", AdminToken: "admin"},
+		Edge:   config.EdgeConfig{PreviewPorts: []int{3000, 8080}},
+		Policy: policy.Config{AllowPaths: []string{"/tmp"}, Commands: map[string]policy.CommandPolicy{"pwd": {Enabled: true}}},
+	})
+
+	state := server.workbenchStatePayload()
+	if len(state.PreviewPorts) != 2 || state.PreviewPorts[0] != 3000 || state.PreviewPorts[1] != 8080 {
+		t.Fatalf("PreviewPorts = %v", state.PreviewPorts)
+	}
+}
+
+func TestWorkbenchStateIncludesAgents(t *testing.T) {
+	t.Parallel()
+
+	server := testServer(t, config.Config{
+		Server: config.ServerConfig{AuthToken: "token", AdminToken: "admin"},
+		Policy: policy.Config{
+			Deny: []string{"gemini"},
+			Commands: map[string]policy.CommandPolicy{
+				"codex":  {Enabled: true, Interactive: true},
+				"claude": {Enabled: true, Interactive: true},
+				"gemini": {Enabled: true, Interactive: true},
+			},
+		},
+	})
+
+	state := server.workbenchStatePayload()
+	if len(state.Agents) != 3 {
+		t.Fatalf("Agents length = %d, want 3", len(state.Agents))
+	}
+	if state.Agents[0].ID != "codex" || !state.Agents[0].Enabled {
+		t.Fatalf("codex agent = %+v, want enabled codex", state.Agents[0])
+	}
+	if state.Agents[1].ID != "claude" || !state.Agents[1].Enabled {
+		t.Fatalf("claude agent = %+v, want enabled claude", state.Agents[1])
+	}
+	if state.Agents[2].ID != "gemini" || state.Agents[2].Enabled {
+		t.Fatalf("gemini agent = %+v, want disabled gemini", state.Agents[2])
+	}
+}
+
+func TestResolveWorkbenchAgentRequiresInteractivePolicy(t *testing.T) {
+	t.Parallel()
+
+	_, err := resolveWorkbenchAgent(config.Config{
+		Policy: policy.Config{Commands: map[string]policy.CommandPolicy{
+			"claude": {Enabled: true, Interactive: false},
+		}},
+	}, "claude")
+	if err == nil {
+		t.Fatal("expected non-interactive claude policy to be rejected")
+	}
+
+	agent, err := resolveWorkbenchAgent(config.Config{
+		Policy: policy.Config{Commands: map[string]policy.CommandPolicy{
+			"gemini": {Enabled: true, Interactive: true},
+		}},
+	}, "gemini")
+	if err != nil {
+		t.Fatalf("resolveWorkbenchAgent gemini: %v", err)
+	}
+	if agent.ID != "gemini" || agent.Command != "gemini" {
+		t.Fatalf("agent = %+v, want gemini", agent)
+	}
+}
+
+func TestResolveWorkbenchTargetFileStartsInParentDir(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	file := filepath.Join(root, "main.go")
+	if err := os.WriteFile(file, []byte("package main\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	workDir, args, err := resolveWorkbenchTarget(config.Config{
+		Policy: policy.Config{AllowPaths: []string{root}},
+	}, "", file)
+	if err != nil {
+		t.Fatalf("resolveWorkbenchTarget: %v", err)
+	}
+	if workDir != root {
+		t.Fatalf("workDir = %q, want %q", workDir, root)
+	}
+	if len(args) != 1 || args[0] != "main.go" {
+		t.Fatalf("args = %v, want [main.go]", args)
+	}
+}
+
+func TestResolveWorkbenchTargetRejectsOutsideAllowedPaths(t *testing.T) {
+	t.Parallel()
+
+	allowed := t.TempDir()
+	other := t.TempDir()
+
+	_, _, err := resolveWorkbenchTarget(config.Config{
+		Policy: policy.Config{AllowPaths: []string{allowed}},
+	}, other, "")
+	if err == nil {
+		t.Fatal("expected outside work_dir to be rejected")
+	}
+}
+
+func TestWarmupWorkbenchTreeSkipsHeavyDirs(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "src"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "node_modules", "pkg"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "src", "main.go"), []byte("package main\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "node_modules", "pkg", "index.js"), []byte("module.exports = {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	result := warmupWorkbenchTree(t.Context(), root, []string{root})
+	if result.Dirs != 2 {
+		t.Fatalf("Dirs = %d, want 2", result.Dirs)
+	}
+	if result.Files != 1 {
+		t.Fatalf("Files = %d, want 1", result.Files)
+	}
+	if result.Skipped == 0 {
+		t.Fatal("expected skipped heavy directory")
+	}
+}

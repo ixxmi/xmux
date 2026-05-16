@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>AI Chat</title>
+    <link rel="stylesheet" href="/chat/styles.css" />
+  </head>
+  <body>
+    <main class="chat-app">
+      <section id="authView" class="auth-view">
+        <form id="authForm" class="auth-card">
+          <div class="app-mark">AI</div>
+          <h1>AI Chat</h1>
+          <p>在手机上继续电脑上的 AI CLI 会话</p>
+          <label for="tokenInput">Access token</label>
+          <input id="tokenInput" type="password" autocomplete="off" placeholder="输入终端鉴权 token" />
+          <button type="submit">继续</button>
+          <span id="authMessage" class="auth-message"></span>
+        </form>
+      </section>
+
+      <section id="chatView" class="chat-view" hidden>
+        <header class="app-header">
+          <div class="header-inner">
+            <div class="brand-row">
+              <div class="app-mark small">AI</div>
+              <div>
+                <strong>AI Chat</strong>
+              <span id="connectionState">Disconnected</span>
+              </div>
+            </div>
+            <div class="header-actions">
+              <button id="stopButton" class="plain danger" type="button">Stop</button>
+              <button id="newButton" class="plain" type="button">New</button>
+            </div>
+          </div>
+        </header>
+
+        <section class="workspace-panel">
+          <div class="workspace-inner context-grid">
+            <div class="context-item primary">
+              <span class="context-label">工作区</span>
+              <strong id="workspacePath">-</strong>
+            </div>
+            <div class="context-item">
+              <span class="context-label">会话</span>
+              <button id="sessionButton" type="button">No session</button>
+            </div>
+            <div class="context-item">
+              <span class="context-label">Agent</span>
+              <select id="agentSelect"></select>
+            </div>
+            <div class="context-item">
+              <span class="context-label">节点</span>
+              <strong id="edgeName">Local</strong>
+            </div>
+            <div class="context-item">
+              <span class="context-label">历史</span>
+              <strong id="sessionSummary">0 sessions</strong>
+            </div>
+          </div>
+        </section>
+
+        <section id="messageList" class="message-list" aria-live="polite"></section>
+
+        <footer class="composer-shell">
+          <form id="composer" class="composer">
+            <textarea id="messageInput" rows="1" placeholder="让 AI 检查、修改、测试或解释代码"></textarea>
+            <div class="composer-actions">
+              <span id="composerMeta">Ready</span>
+              <button id="sendButton" type="submit">发送</button>
+            </div>
+          </form>
+        </footer>
+      </section>
+    </main>
+    <script src="/chat/app.js"></script>
+  </body>
+</html>
