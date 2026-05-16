@@ -2,9 +2,20 @@
   const terminalEl = document.getElementById("terminal");
   const authPanel = document.getElementById("authPanel");
   const authForm = document.getElementById("authPanel");
-  const tokenInput = document.getElementById("tokenInput");
+  const loginModeButton = document.getElementById("loginModeButton");
+  const registerModeButton = document.getElementById("registerModeButton");
+  const usernameInput = document.getElementById("usernameInput");
+  const passwordInput = document.getElementById("passwordInput");
   const authMessage = document.getElementById("authMessage");
   const sessionInfo = document.getElementById("sessionInfo");
+  const statusDot = document.getElementById("statusDot");
+  const accountChip = document.getElementById("accountChip");
+  const accountAvatar = document.getElementById("accountAvatar");
+  const accountName = document.getElementById("accountName");
+  const accountRole = document.getElementById("accountRole");
+  const logoutButton = document.getElementById("logoutButton");
+  const terminalFooter = document.getElementById("terminalFooter");
+  const workDirChip = document.getElementById("workDirChip");
 
   let completions = ["cat", "cd", "codex", "date", "docker", "kubectl", "ls", "pwd", "uname", "whoami"];
 
@@ -19,10 +30,14 @@
   let interactiveMode = false;
   let workDir = "";
   let completing = false;
-  let token = "";
-  sessionStorage.removeItem("cloud-terminal-token");
-  tokenInput.value = "";
-  tokenInput.focus();
+  let authMode = "login";
+  usernameInput.focus();
+  setStatus("idle", "Account required");
+  loadAccountIdentity();
+
+  if (logoutButton) {
+    logoutButton.addEventListener("click", handleLogout);
+  }
 
   window.addEventListener("resize", () => {
     if (!terminal || !fitAddon) {
@@ -34,33 +49,61 @@
 
   authForm.addEventListener("submit", async (event) => {
     event.preventDefault();
-    token = tokenInput.value.trim();
-    if (!token) {
-      setAuthMessage("Token is required.", "error");
+    const username = usernameInput.value.trim();
+    const password = passwordInput.value;
+    if (!username || !password) {
+      setAuthMessage("Account and password are required.", "error");
       return;
     }
 
     setAuthBusy(true);
-    setAuthMessage("Verifying token...", "");
+    setAuthMessage("Verifying account...", "");
+    setStatus("connecting", "Verifying account");
 
     try {
-      const edge = await verifyToken(token);
+      await submitAccount(username, password);
+      const edge = await fetchEdge();
       setCompletions(edge.commands);
       openTerminal(edge);
-      connect(token);
+      await loadAccountIdentity();
+      connect();
     } catch {
       setAuthBusy(false);
-      setAuthMessage("Token verification failed.", "error");
-      sessionInfo.textContent = "Token required";
+      setAuthMessage("Account verification failed.", "error");
+      setStatus("error", "Account required");
     }
   });
 
-  async function verifyToken(accessToken) {
-    const response = await fetch("/cloud-terminal-api/edge", {
-      headers: { Authorization: `Bearer ${accessToken}` }
+  loginModeButton.addEventListener("click", () => setAuthMode("login"));
+  registerModeButton.addEventListener("click", () => setAuthMode("register"));
+
+  function setAuthMode(mode) {
+    authMode = mode;
+    loginModeButton.classList.toggle("active", mode === "login");
+    registerModeButton.classList.toggle("active", mode === "register");
+    authPanel.querySelector("button[type='submit']").textContent = mode === "register" ? "Create account" : "Connect";
+    setAuthMessage("", "");
+    usernameInput.focus();
+  }
+
+  async function submitAccount(username, password) {
+    const path = authMode === "register" ? "/cloud-terminal-api/accounts/register" : "/cloud-terminal-api/accounts/login";
+    const response = await fetch(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, password })
     });
     if (!response.ok) {
-      throw new Error("token rejected");
+      throw new Error("account rejected");
+    }
+    passwordInput.value = "";
+    return response.json();
+  }
+
+  async function fetchEdge() {
+    const response = await fetch("/cloud-terminal-api/edge");
+    if (!response.ok) {
+      throw new Error("account rejected");
     }
     return response.json();
   }
@@ -68,7 +111,10 @@
   function openTerminal(edge) {
     authPanel.classList.add("hidden");
     terminalEl.hidden = false;
-    sessionInfo.textContent = `Connecting · ${edge.name}`;
+    if (terminalFooter) {
+      terminalFooter.hidden = false;
+    }
+    setStatus("connecting", `Connecting · ${edge.name}`);
 
     if (!terminal) {
       terminal = new Terminal({
@@ -203,17 +249,17 @@
     }
   }
 
-  function connect(accessToken) {
+  function connect() {
     if (socket) {
       socket.close();
     }
 
     const protocol = window.location.protocol === "https:" ? "wss" : "ws";
-    const url = `${protocol}://${window.location.host}/cloud-terminal-api/ws/terminal?token=${encodeURIComponent(accessToken)}`;
+    const url = `${protocol}://${window.location.host}/cloud-terminal-api/ws/terminal`;
     socket = new WebSocket(url);
 
     socket.addEventListener("open", () => {
-      sessionInfo.textContent = "Connected";
+      setStatus("connected", "Connected");
     });
 
     socket.addEventListener("message", (event) => {
@@ -227,23 +273,24 @@
       if (terminal) {
         terminal.write("\r\n[disconnected]\r\n");
       }
-      sessionInfo.textContent = "Disconnected";
+      setStatus("disconnected", "Disconnected");
     });
 
     socket.addEventListener("error", () => {
       if (terminal) {
         terminal.write("\r\n\x1b[31mConnection error\x1b[0m\r\n");
       }
-      sessionInfo.textContent = "Connection error";
+      setStatus("error", "Connection error");
     });
   }
 
   function handleMessage(msg) {
     switch (msg.type) {
       case "ready":
-        sessionInfo.textContent = `${msg.session_id} · ${msg.edge_id}`;
+        setStatus("connected", `${msg.session_id} · ${msg.edge_id}`);
         if (msg.work_dir) {
           workDir = msg.work_dir;
+          updateWorkDirChip();
         }
         terminal.write("\r\x1b[2K");
         if (msg.data) {
@@ -274,6 +321,7 @@
         const exitCode = msg.exit_code ?? 0;
         if (msg.work_dir) {
           workDir = msg.work_dir;
+          updateWorkDirChip();
         }
         if (msg.stdout) {
           terminal.write(normalizeNewlines(msg.stdout));
@@ -288,6 +336,7 @@
       case "prompt":
         if (msg.work_dir) {
           workDir = msg.work_dir;
+          updateWorkDirChip();
         }
         prompt();
         break;
@@ -485,7 +534,7 @@
       work_dir: workDir
     });
     const response = await fetch(`/cloud-terminal-api/complete?${params.toString()}`, {
-      headers: { Authorization: `Bearer ${token}` }
+      credentials: "same-origin"
     });
     if (!response.ok) {
       throw new Error("completion failed");
@@ -581,8 +630,11 @@
   }
 
   function setAuthBusy(busy) {
-    tokenInput.disabled = busy;
-    authPanel.querySelector("button").disabled = busy;
+    usernameInput.disabled = busy;
+    passwordInput.disabled = busy;
+    authPanel.querySelectorAll("button").forEach((button) => {
+      button.disabled = busy;
+    });
   }
 
   function setAuthMessage(text, tone) {
@@ -595,5 +647,90 @@
 
   function normalizeNewlines(value) {
     return value.replace(/\n/g, "\r\n");
+  }
+
+  function setStatus(state, label) {
+    if (sessionInfo && typeof label === "string") {
+      sessionInfo.textContent = label;
+    }
+    if (statusDot) {
+      statusDot.dataset.state = state || "idle";
+    }
+  }
+
+  function updateWorkDirChip() {
+    if (!workDirChip) {
+      return;
+    }
+    if (!workDir) {
+      workDirChip.hidden = true;
+      workDirChip.textContent = "";
+      return;
+    }
+    workDirChip.hidden = false;
+    workDirChip.textContent = workDir;
+    workDirChip.title = workDir;
+  }
+
+  async function loadAccountIdentity() {
+    if (!accountChip) {
+      return;
+    }
+    try {
+      const response = await fetch("/cloud-terminal-api/accounts/me", { credentials: "same-origin" });
+      if (!response.ok) {
+        accountChip.hidden = true;
+        return;
+      }
+      const data = await response.json();
+      renderAccountChip(data);
+    } catch {
+      accountChip.hidden = true;
+    }
+  }
+
+  function renderAccountChip(data) {
+    if (!accountChip || !data || !data.username) {
+      if (accountChip) {
+        accountChip.hidden = true;
+      }
+      return;
+    }
+    accountChip.hidden = false;
+    accountName.textContent = data.username;
+    accountRole.textContent = (data.role || "user").toUpperCase();
+    accountAvatar.textContent = buildAvatarInitials(data.username);
+  }
+
+  function buildAvatarInitials(name) {
+    const trimmed = String(name || "").trim();
+    if (!trimmed) {
+      return "--";
+    }
+    const parts = trimmed.split(/[\s@._-]+/).filter(Boolean);
+    if (parts.length >= 2) {
+      return (parts[0][0] + parts[1][0]).toUpperCase();
+    }
+    return trimmed.slice(0, 2).toUpperCase();
+  }
+
+  async function handleLogout() {
+    logoutButton.disabled = true;
+    try {
+      await fetch("/cloud-terminal-api/accounts/logout", {
+        method: "POST",
+        credentials: "same-origin"
+      });
+    } catch {
+      // ignore
+    }
+    if (socket) {
+      try {
+        socket.close();
+      } catch {
+        // ignore
+      }
+    }
+    window.location.reload();
   }
 })();

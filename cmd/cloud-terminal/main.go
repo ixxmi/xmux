@@ -23,10 +23,8 @@ import (
 func main() {
 	var configPath string
 	var mode string
-	var gatewayURL string
 	flag.StringVar(&configPath, "config", "policy.yaml", "security policy file")
 	flag.StringVar(&mode, "mode", "local", "run mode: local, cloud, or agent")
-	flag.StringVar(&gatewayURL, "gateway", "", "cloud gateway URL for agent mode")
 	flag.Parse()
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -65,19 +63,18 @@ func main() {
 		Logger:         logger,
 	})
 
+	cloudTunnel := cfg.CloudTunnel
+	if mode == "local" && cloudTunnel.Enabled {
+		mode = "agent"
+	}
+
 	if mode == "agent" {
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
-		if gatewayURL == "" {
-			gatewayURL = os.Getenv("CLOUD_TERMINAL_GATEWAY")
-		}
-		token := cfg.Server.TunnelToken
-		if envToken := os.Getenv("CLOUD_TERMINAL_TUNNEL_TOKEN"); envToken != "" {
-			token = envToken
-		}
 		agent := agent.New(agent.Options{
-			GatewayURL: gatewayURL,
-			Token:      token,
+			GatewayURL: cloudTunnel.GatewayURL,
+			Username:   cloudTunnel.Account,
+			SessionID:  cloudTunnel.SessionID,
 			Runtime:    runtime,
 			Config:     store,
 			EdgeID:     cfg.Edge.ID,

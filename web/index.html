@@ -3,30 +3,66 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Cloud Terminal</title>
+    <title>xmux</title>
     <link rel="stylesheet" href="/vendor/xterm.css" />
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
     <main class="app">
-      <section class="terminal-shell" aria-label="Cloud terminal">
-        <div class="terminal-header">
-          <div class="traffic" aria-hidden="true">
-            <span></span><span></span><span></span>
+      <section class="terminal-shell" aria-label="xmux terminal">
+        <header class="terminal-header">
+          <div class="header-left">
+            <div class="traffic" aria-hidden="true">
+              <span></span><span></span><span></span>
+            </div>
+            <div class="brand">
+              <div class="brand-mark">xm</div>
+              <div class="brand-text">
+                <span>xmux</span>
+                <strong>Cloud Terminal</strong>
+              </div>
+            </div>
           </div>
-          <span id="sessionInfo">Token required</span>
-        </div>
+          <div class="header-status">
+            <span id="statusDot" class="status-dot" data-state="idle"></span>
+            <span id="sessionInfo">Account required</span>
+          </div>
+          <div class="header-right">
+            <div id="accountChip" class="account-chip" hidden>
+              <span id="accountAvatar" class="account-avatar">--</span>
+              <div class="account-meta">
+                <strong id="accountName">-</strong>
+                <em id="accountRole">user</em>
+              </div>
+              <button id="logoutButton" type="button" class="account-action">退出</button>
+            </div>
+          </div>
+        </header>
 
         <form id="authPanel" class="auth-panel">
-          <label for="tokenInput">Access token</label>
-          <div class="token-row">
-            <input id="tokenInput" name="access-token" type="password" autocomplete="off" placeholder="Enter token" />
-            <button type="submit">Connect</button>
+          <div class="auth-tabs" role="tablist" aria-label="登录方式">
+            <button id="loginModeButton" class="active" type="button">登录</button>
+            <button id="registerModeButton" type="button">注册</button>
           </div>
-          <p id="authMessage" class="auth-message">Authenticate before opening the terminal session.</p>
+          <label for="usernameInput">账号</label>
+          <input id="usernameInput" autocomplete="username" placeholder="用户名或邮箱" />
+          <label for="passwordInput">密码</label>
+          <input id="passwordInput" type="password" autocomplete="current-password" placeholder="云端账号密码" />
+          <button id="connectButton" type="submit">Connect</button>
+          <p id="authMessage" class="auth-message">登录账号后打开终端会话。</p>
         </form>
 
         <div id="terminal" class="terminal" hidden></div>
+
+        <footer id="terminalFooter" class="terminal-footer" hidden>
+          <div class="hint-group">
+            <span class="hint"><kbd>Tab</kbd>补全</span>
+            <span class="hint"><kbd>↑</kbd><kbd>↓</kbd>历史</span>
+            <span class="hint"><kbd>Ctrl</kbd>+<kbd>L</kbd>清屏</span>
+            <span class="hint"><kbd>Ctrl</kbd>+<kbd>C</kbd>取消</span>
+          </div>
+          <span id="workDirChip" class="workdir-chip" hidden></span>
+        </footer>
       </section>
     </main>
 

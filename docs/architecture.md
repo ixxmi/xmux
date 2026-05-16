@@ -29,7 +29,7 @@ Shell operators and expansion characters are rejected at parse time:
 
 ## Production Hardening Checklist
 
-- Replace the development token with a secret from a secret manager.
+- Use strong cloud account passwords, disable open registration after provisioning, and store account data on persistent encrypted storage.
 - Terminate TLS before the Gateway or serve HTTPS directly.
 - Split Edge into a separate binary and require mTLS registration.
 - Run Edge as a non-root user.

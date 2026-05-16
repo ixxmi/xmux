@@ -14,7 +14,7 @@ Mobile Browser
   -> codex / claude / gemini
 ```
 
-公网服务器不需要能主动访问用户电脑。本地 Agent 会主动连出到公网 Gateway，并在这条 WSS 长连接上接收启动会话、输入、resize、文件浏览、diff、预览代理等请求。
+公网服务器不需要主动访问用户电脑。本地 Agent 主动连出到公网 Gateway，并在这条 WSS 长连接上接收启动会话、输入、resize、文件浏览、diff、预览代理等请求。
 
 ## 一、运行模式
 
@@ -23,37 +23,38 @@ Mobile Browser
 ```bash
 ./cloud-terminal -mode local
 ./cloud-terminal -mode cloud
-./cloud-terminal -mode agent -gateway https://cloud.example.com:5955
+./cloud-terminal -mode agent
 ```
-
-模式说明：
 
 | 模式 | 部署位置 | 作用 |
 | --- | --- | --- |
-| `local` | 单机或内网 | 旧模式，Gateway 和本地 Runtime 在一个进程里 |
-| `cloud` | 公网服务器 | 只提供 Web 页面、鉴权、WebSocket 网关、反向隧道服务端 |
-| `agent` | 用户本地电脑 | 主动连接公网 Gateway，真正启动本地 PTY 和 AI CLI |
+| `local` | 单机或内网 | Gateway 和本地 Runtime 在一个进程里 |
+| `cloud` | 公网服务器 | 只提供 Web 页面、账号登录、WebSocket 网关、反向隧道服务端 |
+| `agent` | 用户本地电脑 | 使用管理员在后台统一配置的网关地址和绑定会话主动连接公网 Gateway，真正启动本地 PTY 和 AI CLI |
 
-## 二、Token 说明
+## 二、账号模型
 
-配置文件里有三个 token：
+后台管理、手机工作台、聊天页、根终端页都统一使用云账号密码。浏览器登录后由后端写入 HttpOnly 会话 cookie；本地 Agent 使用管理员在后台访问控制里统一保存的网关地址和“使用当前用户”绑定会话连接云端隧道入口，不再单独填写用户名密码或网关地址。
+
+账号保存在 `server.account_store_path`：
 
 ```yaml
 server:
-  auth_token: "change-me-terminal-token"
-  admin_token: "change-me-admin-token"
-  tunnel_token: "change-me-tunnel-token"
+  admin_username: "admin"
+  admin_password: "admin123456"
+  account_store_path: "data/accounts.json"
+  account_registration_enabled: true
 ```
 
-含义：
+建议部署流程：
 
-| 配置项 | 用途 |
-| --- | --- |
-| `auth_token` | 手机端 `/mobile/`、聊天页 `/chat/` 登录使用 |
-| `admin_token` | 后台 `/admin/` 登录使用 |
-| `tunnel_token` | 本地 Agent 连接公网 Gateway 使用 |
+1. 首次启动云端，用默认管理员 `admin` / `admin123456` 登录 `/admin/`。
+2. 立刻修改 `server.admin_password` 并重启，或改配置后重新部署。
+3. 管理员在后台创建/管理云账号，普通用户在手机端、聊天页和根终端页登录使用。
+4. 在后台访问控制里配置云端网关地址、开启本地穿透，并点击“使用当前用户”绑定当前管理员会话。
+5. 生产环境创建完账号后，把 `server.account_registration_enabled` 改为 `false`，避免开放注册。
 
-生产环境必须改掉默认值。`tunnel_token` 不应该给浏览器用户使用。
+即使关闭注册，当账号库为空时仍允许创建第一个账号，避免全新部署把自己锁在外面。
 
 ## 三、公网云端部署
 
@@ -68,9 +69,10 @@ server:
 ```yaml
 server:
   addr: "127.0.0.1:18001"
-  auth_token: "浏览器访问token"
-  admin_token: "后台管理token"
-  tunnel_token: "本地Agent连接token"
+  admin_username: "admin"
+  admin_password: "admin123456"
+  account_store_path: "data/accounts.json"
+  account_registration_enabled: true
   audit_log_path: "data/audit.jsonl"
   workbench_state_path: "data/workbench_sessions.json"
   allow_hosts:
@@ -80,6 +82,9 @@ server:
   admin_ip_allowlist:
     - "127.0.0.1"
     - "你的管理端公网IP"
+
+cloud_tunnel:
+  enabled: false
 
 edge:
   id: "cloud-gateway"
@@ -120,32 +125,27 @@ policy:
       max_args: 12
 ```
 
-云端 `policy.allow_paths` 在 `cloud` 模式下不代表用户电脑真实路径；真实路径由本地 Agent 上报并在本地 Agent 侧强制校验。保留最小配置即可。
+云端 `policy.allow_paths` 在 `cloud` 模式下不代表用户电脑真实路径；真实路径由本地 Agent 上报并在本地 Agent 侧强制校验。云端保留最小配置即可。
 
 ## 四、本地 Agent 部署
 
 用户电脑运行：
 
 ```bash
-./cloud-terminal -mode agent -config agent.yaml -gateway https://ess-ds.com:5955
-```
-
-也可以用环境变量：
-
-```bash
-export CLOUD_TERMINAL_GATEWAY="https://ess-ds.com:5955"
-export CLOUD_TERMINAL_TUNNEL_TOKEN="本地Agent连接token"
 ./cloud-terminal -mode agent -config agent.yaml
 ```
+
+Agent 只读取管理员在后台访问控制里保存到 `cloud_tunnel.gateway_url` 的网关地址；其他账号直接复用这份配置。
 
 推荐本地 `agent.yaml`：
 
 ```yaml
 server:
   addr: "127.0.0.1:18001"
-  auth_token: "浏览器访问token"
-  admin_token: "后台管理token"
-  tunnel_token: "本地Agent连接token"
+  admin_username: "admin"
+  admin_password: "admin123456"
+  account_store_path: "data/accounts.json"
+  account_registration_enabled: false
   audit_log_path: "data/audit.jsonl"
   workbench_state_path: "data/workbench_sessions.json"
   allow_hosts:
@@ -153,6 +153,10 @@ server:
   admin_ip_allowlist:
     - "127.0.0.1"
     - "::1"
+
+cloud_tunnel:
+  enabled: true
+  gateway_url: "https://ess-ds.com:5955"
 
 edge:
   id: "macbook-pro"
@@ -265,11 +269,7 @@ server {
 }
 ```
 
-如果公网访问地址带端口，例如 `https://ess-ds.com:5955/mobile/`，需要把 `ess-ds.com:5955` 加入云端配置的 `server.allow_hosts`。否则 WebSocket Origin 会被拒绝，日志会出现：
-
-```text
-websocket: request origin not allowed by Upgrader.CheckOrigin
-```
+如果公网访问地址带端口，例如 `https://ess-ds.com:5955/mobile/`，需要把 `ess-ds.com:5955` 加入云端配置的 `server.allow_hosts`。否则 WebSocket Origin 会被拒绝。
 
 ## 六、手机端使用流程
 
@@ -279,25 +279,29 @@ websocket: request origin not allowed by Upgrader.CheckOrigin
    ./cloud-terminal -mode cloud -config cloud.yaml
    ```
 
-2. 本地电脑启动 Agent：
+2. 浏览器打开 `/admin/login.html`，使用管理员账号登录后台。
+
+3. 在后台访问控制里配置云端网关地址、开启本地穿透，并点击“使用当前用户”后保存配置。
+
+4. 本地电脑启动 Agent：
 
    ```bash
-   ./cloud-terminal -mode agent -config agent.yaml -gateway https://ess-ds.com:5955
+   ./cloud-terminal -mode agent -config agent.yaml
    ```
 
-3. 手机打开：
+5. 手机打开：
 
    ```text
    https://ess-ds.com:5955/mobile/
    ```
 
-4. 输入 `server.auth_token`。
+6. 使用云账号登录。
 
-5. 选择 Codex / Claude Code / Gemini。
+7. 选择 Codex / Claude Code / Gemini。
 
-6. 在允许路径范围内选择目录或文件。
+8. 在允许路径范围内选择目录或文件。
 
-7. 点击 Start，系统通过本地 Agent 启动真实的本地 CLI。
+9. 点击 Start，系统通过本地 Agent 启动真实的本地 CLI。
 
 ## 七、会话保持能力
 
@@ -314,7 +318,7 @@ websocket: request origin not allowed by Upgrader.CheckOrigin
 
 - 如果本地 Agent 进程退出，本地 PTY 会被系统结束，无法继续原 CLI。
 - 如果公网云端进程重启，历史记录会从 `workbench_state_path` 恢复，但运行中的 WebSocket attach 状态需要等本地 Agent 重连后恢复。
-- 当前实现是单 Agent 连接模型；同一公网 Gateway 同时只保留最后连接上的本地 Agent。多用户、多 Agent 需要后续增加 edge registry 和按 edge_id 路由。
+- 当前会按账号隔离 Agent 连接和工作台会话；同一账号同时连接多个 Agent 时保留最近连接的一个。
 
 ## 八、后台管理
 
@@ -326,9 +330,8 @@ https://ess-ds.com:5955/admin/
 
 后台支持实时修改：
 
-- `auth_token`
-- `admin_token`
-- `tunnel_token`
+- 云账号数据库路径、注册开关和账号创建
+- 本地穿透开关、云端网关地址，以及“使用当前用户”绑定当前会话
 - WebSocket Origin allowlist
 - 后台管理 IP allowlist
 - 命令白名单和黑名单
@@ -336,14 +339,16 @@ https://ess-ds.com:5955/admin/
 
 保存后会写回当前启动使用的 YAML 配置，并立即更新内存配置，不需要重启服务。
 
-在 `cloud` 模式下，后台文件路径浏览的是公网服务器文件系统，不是用户本地电脑。真实本地目录选择请在 `/mobile/` 内通过本地 Agent 暴露的允许路径选择。
+云账号只有管理员可以管理；普通用户可以进入 `/user/` 管理自己账号的本地穿透开关、命令策略和允许文件路径，网关地址仍只由管理员统一配置。
+
+在 `cloud` 模式下，管理员后台文件路径浏览的是公网服务器文件系统，不是用户本地电脑。普通用户后台会通过本地 Agent 在管理员全局允许路径内浏览和选择自己的可访问路径；手机端文件菜单只显示当前账号保存后的可访问路径。
 
 ## 九、安全建议
 
 - 公网服务器只运行 `cloud` 模式，不在公网服务器上启用真实执行 Runtime。
 - 本地 Agent 使用普通用户运行，不要用 root。
 - `policy.allow_paths` 只配置需要远程操作的项目目录，不要配置 `/`。
-- `tunnel_token` 使用长随机字符串，和浏览器 token 分开。
+- 生产环境创建账号后关闭 `server.account_registration_enabled`。
 - `server.admin_ip_allowlist` 只允许固定管理 IP 或内网段。
 - Nginx 必须启用 HTTPS，浏览器和 Agent 都走 WSS。
 - AI CLI 命令只配置 `codex`、`claude`、`gemini` 这类交互式命令，不要把 `bash/sh/zsh` 放进白名单。
@@ -360,7 +365,7 @@ level=INFO msg="agent tunnel connected"
 level=INFO msg="edge agent tunnel connected"
 ```
 
-如果云端没有 `edge agent tunnel connected`，说明本地 Agent 没连上公网 Gateway。
+如果云端没有 `edge agent tunnel connected`，说明本地 Agent 没连上公网 Gateway。确认后台访问控制里已经点击“使用当前用户”并保存配置。
 
 ### 2. Origin 不允许
 
@@ -389,11 +394,7 @@ proxy_set_header X-Forwarded-Proto $scheme;
 
 ### 3. Agent 返回 unauthorized
 
-本地 `agent.yaml` 的 `server.tunnel_token` 必须和云端 `cloud.yaml` 的 `server.tunnel_token` 一致。也可以用环境变量覆盖：
-
-```bash
-export CLOUD_TERMINAL_TUNNEL_TOKEN="本地Agent连接token"
-```
+重新登录后台后点击“使用当前用户”并保存配置，确保本地配置里的 `cloud_tunnel.account` 和 `cloud_tunnel.session_id` 是最新会话。
 
 ### 4. 能进页面但没有目录
 

@@ -162,6 +162,57 @@ select:focus {
   color: var(--danger);
 }
 
+.login-actions {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+}
+
+.check.standalone {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 42px;
+  color: var(--text);
+  font-weight: 700;
+}
+
+.check.standalone input {
+  width: auto;
+  min-height: 0;
+}
+
+.account-list-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 10px;
+  color: var(--muted);
+  font-weight: 800;
+}
+
+.account-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.account-row {
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.account-row span,
+.empty-state.small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .admin-layout {
   min-height: 100vh;
   display: grid;
@@ -266,9 +317,10 @@ select:focus {
 .header-meta {
   display: flex;
   flex-wrap: wrap;
+  align-items: center;
   justify-content: flex-end;
   gap: 8px;
-  max-width: 460px;
+  max-width: 560px;
 }
 
 .header-meta span {
@@ -706,4 +758,526 @@ select:focus {
 
 [hidden] {
   display: none !important;
+}
+
+.account-menu {
+  position: relative;
+  display: inline-flex;
+}
+
+.account-trigger {
+  width: 38px;
+  height: 38px;
+  min-height: 38px;
+  padding: 0;
+  border-radius: 999px;
+  border-color: rgba(209, 122, 68, 0.42);
+  background: linear-gradient(135deg, #9f5631, #db874a);
+}
+
+.account-trigger:hover {
+  background: linear-gradient(135deg, #b56738, #ea9152);
+}
+
+.account-avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  border-radius: 999px;
+  color: #fff1df;
+  font-size: 13px;
+  font-weight: 900;
+  letter-spacing: 0.2px;
+  text-transform: uppercase;
+}
+
+.account-dropdown {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 50;
+  width: 220px;
+  display: grid;
+  gap: 4px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel);
+  box-shadow: var(--shadow);
+}
+
+.account-info {
+  display: grid;
+  gap: 3px;
+  padding: 6px 8px 8px;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.account-name {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 800;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.account-role {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+
+.account-item {
+  justify-content: flex-start;
+  width: 100%;
+  min-height: 36px;
+  margin-top: 2px;
+  padding: 0 10px;
+  border-color: transparent;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  font-weight: 700;
+}
+
+.account-item:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.account-item.danger {
+  color: #ffb4aa;
+}
+
+.account-item.danger:hover {
+  background: rgba(229, 107, 93, 0.14);
+}
+
+.modal {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+}
+
+.modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.48);
+}
+
+.modal-card {
+  position: relative;
+  width: min(440px, 100%);
+  display: grid;
+  gap: 16px;
+  padding: 22px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--panel);
+  box-shadow: var(--shadow);
+}
+
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.modal-header h2 {
+  margin: 0;
+  font-size: 20px;
+}
+
+.modal-close {
+  width: 32px;
+  height: 32px;
+  min-height: 32px;
+  padding: 0;
+  border-radius: 8px;
+  border-color: var(--line);
+  background: transparent;
+  color: var(--muted);
+  font-size: 20px;
+  line-height: 1;
+}
+
+.modal-close:hover {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text);
+}
+
+.modal-body {
+  display: grid;
+  gap: 12px;
+}
+
+.modal-body label {
+  display: grid;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.modal-message {
+  min-height: 18px;
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.modal-message.error {
+  color: var(--danger);
+}
+
+.modal-message.ok {
+  color: var(--cool);
+}
+
+.modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+/* Figma editorial theme */
+:root {
+  color-scheme: light;
+  --bg: #ffffff;
+  --bg-2: #ffffff;
+  --sidebar: #ffffff;
+  --panel: #ffffff;
+  --panel-soft: #f7f7f5;
+  --field: #ffffff;
+  --line: #000000;
+  --line-soft: #e6e6e6;
+  --text: #000000;
+  --muted: #000000;
+  --muted-2: #4f4f4f;
+  --accent: #000000;
+  --accent-strong: #000000;
+  --accent-soft: #dceeb1;
+  --cool: #000000;
+  --cool-soft: #c8e6cd;
+  --danger: #ff3d8b;
+  --shadow: none;
+  font-family: figmaSans, Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+body {
+  background: #ffffff;
+  color: #000000;
+}
+
+button {
+  min-height: 44px;
+  border-color: #000000;
+  border-radius: 50px;
+  background: #000000;
+  color: #ffffff;
+  font-size: 18px;
+  font-weight: 480;
+  letter-spacing: 0;
+}
+
+button:hover {
+  background: #000000;
+}
+
+button.secondary,
+.nav-item,
+.tab {
+  border-color: #000000;
+  background: #ffffff;
+  color: #000000;
+}
+
+button.secondary:hover,
+.nav-item:hover,
+.nav-item.active,
+.tab:hover,
+.tab.active {
+  background: #000000;
+  color: #ffffff;
+}
+
+button.danger {
+  border-color: #000000;
+  background: #efd4d4;
+  color: #000000;
+}
+
+input,
+textarea,
+select {
+  border-color: #000000;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #000000;
+}
+
+input:focus,
+textarea:focus,
+select:focus {
+  border-color: #000000;
+  box-shadow: 0 0 0 3px rgba(0, 0, 0, 0.12);
+}
+
+.login-shell {
+  background: #ffffff;
+}
+
+.login-box {
+  width: min(560px, calc(100vw - 32px));
+  gap: 16px;
+  border: 0;
+  border-radius: 24px;
+  padding: 48px;
+  background: #c5b0f4;
+  box-shadow: none;
+}
+
+.login-mark,
+.brand-mark {
+  background: #000000;
+  color: #ffffff;
+}
+
+.login-mark {
+  border-radius: 9999px;
+}
+
+.login-box h1 {
+  font-size: 64px;
+  font-weight: 340;
+  line-height: 1;
+  letter-spacing: 0;
+}
+
+.login-subtitle,
+.login-box label,
+.login-message {
+  color: #000000;
+}
+
+.login-box label,
+.section-eyebrow,
+.brand span,
+#saveState {
+  font-family: figmaMono, "SF Mono", Menlo, monospace;
+  font-size: 12px;
+  font-weight: 400;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+}
+
+.admin-layout,
+.content,
+.sidebar {
+  background: #ffffff;
+}
+
+.sidebar,
+.brand {
+  border-color: #e6e6e6;
+}
+
+.brand strong {
+  font-size: 24px;
+  font-weight: 700;
+}
+
+.header-meta span,
+.path-count,
+.badge {
+  border-color: #000000;
+  border-radius: 9999px;
+  background: #f7f7f5;
+  color: #000000;
+  font-family: figmaMono, "SF Mono", Menlo, monospace;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+}
+
+.section-grid.two > .panel:nth-child(1),
+.path-layout > .panel:nth-child(1) {
+  background: #dceeb1;
+}
+
+.section-grid.two > .panel:nth-child(2),
+.path-layout > .panel:nth-child(2) {
+  background: #f4ecd6;
+}
+
+.panel {
+  border: 0;
+  border-radius: 24px;
+  padding: 32px;
+  background: #ffffff;
+  box-shadow: none;
+}
+
+.panel h2 {
+  font-size: 26px;
+  font-weight: 540;
+  line-height: 1.35;
+  letter-spacing: 0;
+}
+
+.panel label {
+  color: #000000;
+  font-size: 16px;
+  font-weight: 480;
+}
+
+.tabs,
+.pathbar {
+  border-color: #000000;
+  border-radius: 50px;
+  background: #ffffff;
+}
+
+.command-item,
+.account-row,
+.file-row {
+  border-color: #000000;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.command-item.active,
+.file-row:hover {
+  border-color: #000000;
+  background: #c8e6cd;
+  transform: none;
+}
+
+.file-icon,
+.is-dir .file-icon,
+.is-file .file-icon {
+  border-color: #000000;
+  border-radius: 8px;
+  background: #f7f7f5;
+}
+
+.file-action.primary:hover,
+.file-action.cancel:hover {
+  background: #000000;
+}
+
+.file-action.cancel {
+  border-color: #000000;
+  background: #efd4d4;
+  color: #000000;
+}
+
+#currentPath,
+.file-label {
+  color: #000000;
+}
+
+.file-meta,
+.account-row span,
+.empty-state,
+.muted {
+  color: #4f4f4f;
+}
+
+.account-trigger {
+  border-color: #000000;
+  background: #000000;
+}
+
+.account-trigger:hover {
+  background: #000000;
+}
+
+.account-avatar {
+  color: #ffffff;
+}
+
+.account-dropdown {
+  border-color: #000000;
+  border-radius: 16px;
+  background: #ffffff;
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.08);
+}
+
+.account-info {
+  border-bottom-color: #e6e6e6;
+}
+
+.account-name {
+  color: #000000;
+}
+
+.account-role {
+  color: #4f4f4f;
+  font-family: figmaMono, "SF Mono", Menlo, monospace;
+}
+
+.account-item {
+  border-color: transparent;
+  background: transparent;
+  color: #000000;
+}
+
+.account-item:hover {
+  background: #f4ecd6;
+}
+
+.account-item.danger {
+  color: #000000;
+}
+
+.account-item.danger:hover {
+  background: #efd4d4;
+}
+
+.modal-card {
+  border-color: #000000;
+  border-radius: 24px;
+  background: #ffffff;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.12);
+}
+
+.modal-close {
+  border-color: #000000;
+  background: #ffffff;
+  color: #000000;
+}
+
+.modal-close:hover {
+  background: #f4ecd6;
+}
+
+.modal-message {
+  color: #4f4f4f;
+}
+
+.modal-message.error {
+  color: var(--danger);
+}
+
+.modal-message.ok {
+  color: #000000;
+}
+
+@media (max-width: 720px) {
+  .login-box,
+  .panel {
+    border-radius: 0;
+    padding: 28px 20px;
+  }
+
+  .login-box h1 {
+    font-size: 44px;
+  }
 }

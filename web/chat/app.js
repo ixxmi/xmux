@@ -6,7 +6,12 @@
   const authView = document.getElementById("authView");
   const chatView = document.getElementById("chatView");
   const authForm = document.getElementById("authForm");
-  const tokenInput = document.getElementById("tokenInput");
+  const loginModeButton = document.getElementById("loginModeButton");
+  const registerModeButton = document.getElementById("registerModeButton");
+  const usernameLabel = document.getElementById("usernameLabel");
+  const usernameInput = document.getElementById("usernameInput");
+  const passwordLabel = document.getElementById("passwordLabel");
+  const passwordInput = document.getElementById("passwordInput");
   const authMessage = document.getElementById("authMessage");
   const connectionState = document.getElementById("connectionState");
   const sessionButton = document.getElementById("sessionButton");
@@ -26,7 +31,7 @@
   let socket = null;
   let sessionID = localStorage.getItem(SESSION_KEY) || "";
   let selectedAgent = normalizeAgentID(localStorage.getItem(ACTIVE_AGENT_KEY) || "codex");
-  let accessToken = "";
+  let authMode = "login";
   let socketSeq = 0;
   let reconnectTimer = 0;
   let reconnectAttempts = 0;
@@ -51,24 +56,28 @@
 
   authForm.addEventListener("submit", async (event) => {
     event.preventDefault();
-    const token = tokenInput.value.trim();
-    if (!token) {
-      showAuthError("Token is required.");
+    const username = usernameInput.value.trim();
+    const password = passwordInput.value;
+    if (!username || !password) {
+      showAuthError("Account and password are required.");
       return;
     }
     setAuthBusy(true);
     authMessage.textContent = "Verifying...";
     try {
-      accessToken = token;
-      state = await auth(token);
-      tokenInput.value = "";
+      const result = authMode === "register" ? await registerAccount(username, password) : await loginAccount(username, password);
+      state = result.state || result;
+      passwordInput.value = "";
       openChat();
     } catch (error) {
-      showAuthError(error.message || "Token rejected.");
+      showAuthError(error.message || "Login rejected.");
     } finally {
       setAuthBusy(false);
     }
   });
+
+  loginModeButton.addEventListener("click", () => setAuthMode("login"));
+  registerModeButton.addEventListener("click", () => setAuthMode("register"));
 
   composer.addEventListener("submit", (event) => {
     event.preventDefault();
@@ -135,8 +144,7 @@
   });
 
   async function bootstrap() {
-    tokenInput.value = "";
-    tokenInput.focus();
+    usernameInput.focus();
     try {
       state = await fetchJSON("/cloud-terminal-api/workbench/state", null, 5000);
       openChat();
@@ -146,11 +154,32 @@
     }
   }
 
-  async function auth(token) {
-    return fetchJSON("/cloud-terminal-api/workbench/auth", {
+  function setAuthMode(mode) {
+    authMode = mode;
+    loginModeButton.classList.toggle("active", mode === "login");
+    registerModeButton.classList.toggle("active", mode === "register");
+    usernameLabel.hidden = false;
+    usernameInput.hidden = false;
+    passwordLabel.hidden = false;
+    passwordInput.hidden = false;
+    authForm.querySelector("button[type='submit']").textContent = mode === "register" ? "创建账号" : "继续";
+    authMessage.textContent = "";
+    usernameInput.focus();
+  }
+
+  async function loginAccount(username, password) {
+    return fetchJSON("/cloud-terminal-api/accounts/login", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ token })
+      body: JSON.stringify({ username, password })
+    }, 8000);
+  }
+
+  async function registerAccount(username, password) {
+    return fetchJSON("/cloud-terminal-api/accounts/register", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, password })
     }, 8000);
   }
 
@@ -185,9 +214,6 @@
       params.set("session_id", sessionID);
     } else {
       params.set("agent", selectedAgent);
-    }
-    if (accessToken) {
-      params.set("token", accessToken);
     }
     const protocol = window.location.protocol === "https:" ? "wss" : "ws";
     socket = new WebSocket(`${protocol}://${window.location.host}/cloud-terminal-api/ws/workbench?${params.toString()}`);
@@ -234,7 +260,7 @@
         return;
       }
       setConnection("Connection error");
-      addSystem("WebSocket 连接失败，请检查 token、Origin 白名单或反向代理 Upgrade 配置。");
+      addSystem("WebSocket 连接失败，请检查账号登录、Origin 白名单或反向代理 Upgrade 配置。");
     });
   }
 
@@ -622,8 +648,11 @@
   }
 
   function setAuthBusy(busy) {
-    tokenInput.disabled = busy;
-    authForm.querySelector("button").disabled = busy;
+    usernameInput.disabled = busy;
+    passwordInput.disabled = busy;
+    authForm.querySelectorAll("button").forEach((button) => {
+      button.disabled = busy;
+    });
   }
 
   function showAuthError(value) {

@@ -72,11 +72,21 @@ func (e *Engine) Decide(command string, args []string) (*Decision, error) {
 		return nil, fmt.Errorf("%w: %s accepts at most %d arguments", ErrDenied, command, rule.MaxArgs)
 	}
 
+	bin := rule.Bin
+	if bin == "" {
+		bin = command
+	}
+	decisionArgs := slices.Clone(args)
+	if rule.Interactive && len(decisionArgs) > 0 && filepath.IsAbs(filepath.Clean(decisionArgs[0])) {
+		bin = decisionArgs[0]
+		decisionArgs = decisionArgs[1:]
+	}
+
 	if len(rule.Subcommands) > 0 {
-		if len(args) == 0 {
+		if len(decisionArgs) == 0 {
 			return nil, fmt.Errorf("%w: %s requires a subcommand", ErrDenied, command)
 		}
-		subcommand := args[0]
+		subcommand := decisionArgs[0]
 		if !slices.Contains(rule.Subcommands, subcommand) {
 			return nil, fmt.Errorf("%w: %s %s is not allowed", ErrDenied, command, subcommand)
 		}
@@ -84,17 +94,12 @@ func (e *Engine) Decide(command string, args []string) (*Decision, error) {
 
 	allowedPaths := append(slices.Clone(e.cfg.AllowPaths), rule.AllowPaths...)
 	if len(allowedPaths) > 0 {
-		if err := validatePaths(args, allowedPaths); err != nil {
+		if err := validatePaths(decisionArgs, allowedPaths); err != nil {
 			return nil, fmt.Errorf("%w: %v", ErrDenied, err)
 		}
 	}
 
-	bin := rule.Bin
-	if bin == "" {
-		bin = command
-	}
-
-	return &Decision{Command: command, Args: slices.Clone(args), Bin: bin, Interactive: rule.Interactive}, nil
+	return &Decision{Command: command, Args: decisionArgs, Bin: bin, Interactive: rule.Interactive}, nil
 }
 
 func validatePaths(args []string, allowedRoots []string) error {

@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>xmux User</title>
+    <link rel="stylesheet" href="/user/styles.css" />
+  </head>
+  <body>
+    <main class="user-layout">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark">xm</div>
+          <div>
+            <span>xmux</span>
+            <strong>用户后台</strong>
+          </div>
+        </div>
+        <nav class="nav">
+          <button class="nav-item active" type="button" data-section="access">访问控制</button>
+          <button class="nav-item" type="button" data-section="commands">命令策略</button>
+          <button class="nav-item" type="button" data-section="paths">文件路径</button>
+          <button class="nav-item" type="button" data-section="account">账号信息</button>
+        </nav>
+        <div class="sidebar-footer">
+          <span id="saveState">Loaded</span>
+          <a href="/mobile/">返回终端</a>
+        </div>
+      </aside>
+
+      <section class="content">
+        <header class="content-header">
+          <p id="sectionEyebrow" class="section-eyebrow">访问控制</p>
+          <div class="account-chip">
+            <span id="accountAvatar">xm</span>
+            <strong id="accountName">-</strong>
+            <em id="accountRole">-</em>
+            <button id="logoutButton" class="secondary" type="button">退出</button>
+          </div>
+        </header>
+
+        <section class="section active" id="section-access">
+          <div class="section-grid two">
+            <article class="panel color-lime">
+              <h2>本地穿透服务</h2>
+              <p>控制当前账号是否允许本地客户端接入云端入口。云端入口由管理员统一维护，客户端同步配置即可。</p>
+              <label class="check standalone">
+                <input id="cloudTunnelEnabled" type="checkbox" />
+                启用当前账号的本地穿透
+              </label>
+            </article>
+            <article class="panel">
+              <h2>策略边界</h2>
+              <p>管理员配置的是全局上限。你只能在这个范围内缩小自己的命令和文件路径权限。</p>
+              <div id="policySummary" class="summary-grid"></div>
+            </article>
+          </div>
+        </section>
+
+        <section class="section" id="section-commands">
+          <div class="command-layout">
+            <article class="panel command-list-panel">
+              <div class="panel-toolbar">
+                <h2>可用命令</h2>
+                <button id="enableAllCommands" class="secondary" type="button">全部启用</button>
+              </div>
+              <div id="commandList" class="command-list"></div>
+            </article>
+            <article class="panel">
+              <h2>说明</h2>
+              <p>禁用后只影响你的账号。管理员全局禁用的命令不会在终端里启用，也无法由用户后台打开。</p>
+            </article>
+          </div>
+        </section>
+
+        <section class="section" id="section-paths">
+          <div class="path-layout">
+            <article class="panel path-browser-panel">
+              <div class="panel-toolbar">
+                <h2>全局可访问路径</h2>
+                <span id="fileCount" class="path-count">0 项</span>
+              </div>
+              <div class="pathbar">
+                <button id="rootsButton" class="secondary" type="button">Roots</button>
+                <button id="upButton" class="secondary" type="button">Up</button>
+                <span id="currentPath"></span>
+              </div>
+              <div id="fileList" class="file-list"></div>
+            </article>
+            <article class="panel">
+              <h2>我的允许路径</h2>
+              <p>终端文件菜单和启动位置只会显示这里保存的路径。</p>
+              <textarea id="allowPaths" rows="18" spellcheck="false"></textarea>
+            </article>
+          </div>
+        </section>
+
+        <section class="section" id="section-account">
+          <div class="section-grid two">
+            <article class="panel">
+              <h2>账号</h2>
+              <label>用户名<input id="profileUsername" readonly /></label>
+              <label>角色<input id="profileRole" readonly /></label>
+            </article>
+            <article class="panel color-lilac">
+              <h2>修改密码</h2>
+              <label>当前密码<input id="currentPassword" type="password" autocomplete="current-password" /></label>
+              <label>新密码<input id="newPassword" type="password" autocomplete="new-password" placeholder="至少 8 位" /></label>
+              <button id="saveProfileButton" type="button">保存密码</button>
+              <p id="profileMessage" class="message"></p>
+            </article>
+          </div>
+        </section>
+
+        <footer class="savebar">
+          <button id="saveButton" type="button">保存策略</button>
+        </footer>
+      </section>
+    </main>
+    <script src="/user/app.js"></script>
+  </body>
+</html>

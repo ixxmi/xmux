@@ -13,7 +13,12 @@
   const workbenchView = document.getElementById("workbenchView");
   const targetView = document.getElementById("targetView");
   const authForm = document.getElementById("authForm");
-  const tokenInput = document.getElementById("tokenInput");
+  const loginModeButton = document.getElementById("loginModeButton");
+  const registerModeButton = document.getElementById("registerModeButton");
+  const usernameLabel = document.getElementById("usernameLabel");
+  const usernameInput = document.getElementById("usernameInput");
+  const passwordLabel = document.getElementById("passwordLabel");
+  const passwordInput = document.getElementById("passwordInput");
   const authMessage = document.getElementById("authMessage");
   const connectionState = document.getElementById("connectionState");
   const sessionButton = document.getElementById("sessionButton");
@@ -25,6 +30,8 @@
   const processBackdrop = document.getElementById("processBackdrop");
   const processList = document.getElementById("processList");
   const processSummary = document.getElementById("processSummary");
+  const tunnelBlockedView = document.getElementById("tunnelBlockedView");
+  const reloadStateButton = document.getElementById("reloadStateButton");
   const addFolderButton = document.getElementById("addFolderButton");
   const folderPicker = document.getElementById("folderPicker");
   const folderPickerPath = document.getElementById("folderPickerPath");
@@ -59,8 +66,17 @@
   const openPreviewButton = document.getElementById("openPreviewButton");
   const refreshPreviewButton = document.getElementById("refreshPreviewButton");
   const previewFrame = document.getElementById("previewFrame");
+  const accountAvatar = document.getElementById("accountAvatar");
+  const settingsAccount = document.getElementById("settingsAccount");
+  const settingsRole = document.getElementById("settingsRole");
+  const logoutButton = document.getElementById("logoutButton");
+  const currentPasswordInput = document.getElementById("currentPasswordInput");
+  const newPasswordInput = document.getElementById("newPasswordInput");
+  const profileMessage = document.getElementById("profileMessage");
+  const saveProfileButton = document.getElementById("saveProfileButton");
 
   let state = null;
+  let currentAccount = null;
   let terminal = null;
   let fitAddon = null;
   let socket = null;
@@ -74,7 +90,7 @@
   let activeTab = "terminal";
   let reconnectTimer = 0;
   let manualClose = false;
-  let accessToken = "";
+  let authMode = "login";
   let reconnectAttempts = 0;
   let socketSeq = 0;
   let agentStarted = false;
@@ -107,26 +123,35 @@
 
   authForm.addEventListener("submit", async (event) => {
     event.preventDefault();
-    const token = tokenInput.value.trim();
-    if (!token) {
-      setAuthMessage("Token is required.");
+    const username = usernameInput.value.trim();
+    const password = passwordInput.value;
+    if (!username || !password) {
+      setAuthMessage("Account and password are required.");
       return;
     }
     setAuthBusy(true);
     setAuthMessage("Verifying...");
     try {
-      accessToken = token;
-      state = await auth(token);
-      tokenInput.value = "";
+      const result = authMode === "register" ? await registerAccount(username, password) : await loginAccount(username, password);
+      currentAccount = { username: result.username || username, role: result.role || "user" };
+      state = result.state || result;
+      passwordInput.value = "";
       showWorkbench();
     } catch (error) {
-      setAuthMessage(error.message || "Token rejected.");
+      setAuthMessage(error.message || "Login rejected.");
     } finally {
       setAuthBusy(false);
     }
   });
 
+  loginModeButton.addEventListener("click", () => setAuthMode("login"));
+  registerModeButton.addEventListener("click", () => setAuthMode("register"));
+
   startAgentButton.addEventListener("click", async () => {
+    if (tunnelUnavailableForUser()) {
+      showTunnelBlocked();
+      return;
+    }
     if (!selectedTarget) {
       return;
     }
@@ -143,6 +168,10 @@
 
   reconnectButton.addEventListener("click", () => {
     closeActionMenu();
+    if (tunnelUnavailableForUser()) {
+      showTunnelBlocked();
+      return;
+    }
     if (!selectedTarget && !sessionID) {
       showTargetPicker();
       return;
@@ -176,6 +205,10 @@
 
   newSessionButton.addEventListener("click", () => {
     closeActionMenu();
+    if (tunnelUnavailableForUser()) {
+      showTunnelBlocked();
+      return;
+    }
     closeSocketOnly();
     sessionID = "";
     agentStarted = false;
@@ -184,6 +217,10 @@
   });
 
   processButton.addEventListener("click", () => {
+    if (tunnelUnavailableForUser()) {
+      showTunnelBlocked();
+      return;
+    }
     processPanelOpen = !processPanelOpen;
     if (!processPanelOpen) {
       newTerminalFolder = "";
@@ -257,6 +294,9 @@
   refreshDiffButton.addEventListener("click", () => loadDiff(""));
   openPreviewButton.addEventListener("click", () => openPreview());
   refreshPreviewButton.addEventListener("click", () => openPreview(true));
+  logoutButton.addEventListener("click", logoutAccount);
+  saveProfileButton.addEventListener("click", saveProfile);
+  reloadStateButton.addEventListener("click", refreshWorkbenchState);
   fileDiffButton.addEventListener("click", () => {
     if (selectedFile) {
       activateTab("diff");
@@ -288,9 +328,10 @@
   });
 
   async function bootstrap() {
-    tokenInput.value = "";
-    tokenInput.focus();
+    usernameInput.focus();
     try {
+      const account = await fetchJSON("/cloud-terminal-api/accounts/me", null, 5000);
+      currentAccount = { username: account.username, role: account.role || "user" };
       state = await fetchJSON("/cloud-terminal-api/workbench/state", null, 5000);
       showWorkbench();
     } catch {
@@ -299,12 +340,95 @@
     }
   }
 
-  async function auth(token) {
-    return fetchJSON("/cloud-terminal-api/workbench/auth", {
+  function setAuthMode(mode) {
+    authMode = mode;
+    loginModeButton.classList.toggle("active", mode === "login");
+    registerModeButton.classList.toggle("active", mode === "register");
+    usernameLabel.hidden = false;
+    usernameInput.hidden = false;
+    passwordLabel.hidden = false;
+    passwordInput.hidden = false;
+    authForm.querySelector("button[type='submit']").textContent = mode === "register" ? "创建账号" : "登录";
+    setAuthMessage("");
+    usernameInput.focus();
+  }
+
+  async function loginAccount(username, password) {
+    return fetchJSON("/cloud-terminal-api/accounts/login", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ token })
+      body: JSON.stringify({ username, password })
     }, 8000);
+  }
+
+  async function registerAccount(username, password) {
+    return fetchJSON("/cloud-terminal-api/accounts/register", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, password })
+    }, 8000);
+  }
+
+  async function logoutAccount() {
+    await fetchJSON("/cloud-terminal-api/accounts/logout", { method: "POST" }, 5000).catch(() => null);
+    closeSocketOnly();
+    sessionID = "";
+    state = null;
+    currentAccount = null;
+    localStorage.removeItem(SESSION_KEY);
+    localStorage.removeItem(TARGET_KEY);
+    authView.hidden = false;
+    workbenchView.hidden = true;
+    passwordInput.value = "";
+    setAuthMessage("");
+    usernameInput.focus();
+  }
+
+  function renderSettingsShell() {
+    const username = currentAccount?.username || "-";
+    const role = currentAccount?.role || "-";
+    settingsAccount.textContent = username;
+    settingsRole.textContent = role === "admin" ? "管理员" : "用户";
+    accountAvatar.textContent = avatarText(username);
+  }
+
+  async function saveProfile() {
+    const currentPassword = currentPasswordInput.value;
+    const newPassword = newPasswordInput.value;
+    if (!currentPassword || !newPassword) {
+      profileMessage.textContent = "请输入当前密码和新密码";
+      return;
+    }
+    saveProfileButton.disabled = true;
+    profileMessage.textContent = "保存中...";
+    try {
+      await fetchJSON("/cloud-terminal-api/accounts/me", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ current_password: currentPassword, new_password: newPassword })
+      }, 8000);
+      currentPasswordInput.value = "";
+      newPasswordInput.value = "";
+      profileMessage.textContent = "账号信息已更新";
+    } catch (error) {
+      profileMessage.textContent = error.message || "保存失败";
+    } finally {
+      saveProfileButton.disabled = false;
+    }
+  }
+
+  async function refreshWorkbenchState() {
+    try {
+      state = await fetchJSON("/cloud-terminal-api/workbench/state", null, 5000);
+      sessions = Array.isArray(state.sessions) ? state.sessions : [];
+      ensureSelectedAgent();
+      renderAgentSelector();
+      renderPreviewPorts();
+      renderProcessList();
+      showWorkbench();
+    } catch (error) {
+      setConnection(error.message || "Refresh failed");
+    }
   }
 
   function showWorkbench() {
@@ -313,11 +437,17 @@
     sessions = Array.isArray(state.sessions) ? state.sessions : [];
     ensureSelectedAgent();
     workspacePath.textContent = state.work_dir || "";
+    reconcileSavedTargetWithState();
     currentPath = selectedTarget?.workDir || state.work_dir;
     syncFoldersFromSessions();
     renderAgentSelector();
     renderPreviewPorts();
     renderProcessList();
+    renderSettingsShell();
+    if (tunnelUnavailableForUser()) {
+      showTunnelBlocked();
+      return;
+    }
     if (sessionID && sessions.some((item) => item.id === sessionID && item.running)) {
       sessionButton.textContent = shortSession(sessionID);
       restoreSession();
@@ -333,25 +463,61 @@
 
   function showTargetPicker() {
     agentStarted = false;
+    tunnelBlockedView.hidden = true;
     targetView.hidden = false;
     terminalPage.hidden = true;
     keybar.hidden = true;
-    bottomTabs.hidden = true;
+    bottomTabs.hidden = false;
+    setActivePage("terminal");
+    setActiveTabButton("terminal");
     updateProcessPanelVisibility();
     setConnection("Choose target");
     setWorkbenchTabsEnabled(false);
     renderAgentSelector();
     updateSelectedTarget();
-    loadTargetFiles(selectedTarget?.workDir || state?.work_dir || "");
+    renderAccessibleRoots();
+    if (selectedTarget?.workDir || state?.work_dir) {
+      loadTargetFiles(selectedTarget?.workDir || state?.work_dir || "");
+    } else {
+      targetSelection.textContent = "请先在用户后台配置允许访问路径";
+      startAgentButton.disabled = true;
+    }
   }
 
   function hideTargetPicker() {
+    tunnelBlockedView.hidden = true;
     targetView.hidden = true;
     terminalPage.hidden = false;
     keybar.hidden = false;
     bottomTabs.hidden = false;
     updateProcessPanelVisibility();
     setWorkbenchTabsEnabled(true);
+  }
+
+  function showTunnelBlocked() {
+    closeSocketOnly();
+    closeActionMenu();
+    agentStarted = false;
+    sessionID = "";
+    localStorage.removeItem(SESSION_KEY);
+    processPanelOpen = false;
+    folderPickerOpen = false;
+    newTerminalFolder = "";
+    updateProcessPanelVisibility();
+    targetView.hidden = true;
+    tunnelBlockedView.hidden = false;
+    terminalPage.hidden = true;
+    keybar.hidden = true;
+    bottomTabs.hidden = false;
+    activeTab = "terminal";
+    setActivePage("terminal");
+    setActiveTabButton("terminal");
+    setWorkbenchTabsEnabled(false);
+    setConnection("Tunnel disabled");
+  }
+
+  function tunnelUnavailableForUser() {
+    return Boolean(state?.tunnel && !state?.edge_online);
   }
 
   async function startAgent() {
@@ -533,9 +699,6 @@
         }
       }
     }
-    if (accessToken) {
-      params.set("token", accessToken);
-    }
     const protocol = window.location.protocol === "https:" ? "wss" : "ws";
     socket = new WebSocket(`${protocol}://${window.location.host}/cloud-terminal-api/ws/workbench?${params.toString()}`);
     manualClose = false;
@@ -564,7 +727,7 @@
         return;
       }
       if (event.code === 1008 || event.code === 1002 || event.code === 1003 || event.code === 1011) {
-        writeTerminal("\x1b[31mWebSocket stopped. Please check token, Origin allowlist, and server logs.\x1b[0m\r\n");
+        writeTerminal("\x1b[31mWebSocket stopped. Please check account login, Origin allowlist, and server logs.\x1b[0m\r\n");
         return;
       }
       if (agentStarted && reconnectAttempts < 5) {
@@ -580,7 +743,7 @@
       }
       setConnection("Connection error");
       markSessionDone(sessionID);
-      writeTerminalError("WebSocket connection error. Check token, Origin allowlist, and reverse proxy WebSocket upgrade.");
+      writeTerminalError("WebSocket connection error. Check account login, Origin allowlist, and reverse proxy WebSocket upgrade.");
     });
   }
 
@@ -653,7 +816,12 @@
   }
 
   async function loadTargetFiles(path) {
+    if (tunnelUnavailableForUser()) {
+      renderAccessibleRoots();
+      return;
+    }
     if (!path) {
+      renderAccessibleRoots();
       return;
     }
     try {
@@ -669,6 +837,9 @@
   }
 
   function openFolderPicker() {
+    if (tunnelUnavailableForUser()) {
+      return;
+    }
     folderPickerOpen = true;
     processPanelOpen = true;
     updateProcessPanelVisibility();
@@ -772,6 +943,27 @@
     }
   }
 
+  function renderAccessibleRoots() {
+    targetPath = "";
+    targetParent = "";
+    targetCurrentPath.textContent = "可访问路径";
+    targetParentButton.disabled = true;
+    targetFileList.innerHTML = "";
+    const roots = Array.isArray(state?.allow_paths) ? state.allow_paths : [];
+    if (roots.length === 0) {
+      targetFileList.innerHTML = '<div class="empty">用户后台未配置允许访问路径</div>';
+      return;
+    }
+    for (const root of roots) {
+      targetFileList.appendChild(targetRow({
+        name: root,
+        path: root,
+        is_dir: true,
+        size: 0
+      }, false));
+    }
+  }
+
   function targetRow(entry, currentDir) {
     const button = document.createElement("button");
     const isSelected = selectedTarget && selectedTarget.path === entry.path && ((entry.is_dir && selectedTarget.kind === "dir") || (!entry.is_dir && selectedTarget.kind === "file"));
@@ -824,6 +1016,11 @@
       startAgentButton.disabled = true;
       return;
     }
+    if (!selectedTarget.workDir) {
+      targetSelection.textContent = "请先在用户后台配置允许访问路径";
+      startAgentButton.disabled = true;
+      return;
+    }
     const agent = agentLabel(selectedAgent);
     targetSelection.textContent = selectedTarget.kind === "dir" ? `${agent} · 目录：${selectedTarget.path}` : `${agent} · 文件：${selectedTarget.path}`;
     startAgentButton.textContent = `Start ${agent}`;
@@ -836,9 +1033,31 @@
     const busyCount = sessions.filter((item) => item.busy).length;
     processSummary.textContent = `${busyCount} 执行中 / ${sessions.length} 会话`;
     processList.innerHTML = "";
-    const folders = (processFolders.length > 0 ? processFolders : inferFoldersFromSessions()).filter((folder) => !archivedFolders.has(folder));
+    const roots = Array.isArray(state?.allow_paths) ? state.allow_paths : [];
+    if (roots.length > 0) {
+      const rootsBlock = document.createElement("section");
+      rootsBlock.className = "process-roots";
+      rootsBlock.innerHTML = '<strong>可访问路径</strong><div class="process-root-list"></div>';
+      const list = rootsBlock.querySelector(".process-root-list");
+      for (const root of roots) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.title = root;
+        button.innerHTML = `<span class="folder-icon">${folderIcon()}</span><span>${escapeHTML(root)}</span>`;
+        button.addEventListener("click", () => openFolderSession(root, selectedAgent));
+        list.appendChild(button);
+      }
+      processList.appendChild(rootsBlock);
+    }
+    const folders = (processFolders.length > 0 ? processFolders : inferFoldersFromSessions())
+      .filter((folder) => !archivedFolders.has(folder))
+      .filter((folder) => !roots.includes(folder));
     if (folders.length === 0) {
-      processList.innerHTML = '<div class="process-empty">先选择一个文件夹，或在目录选择器中添加。</div>';
+      if (roots.length === 0) {
+        processList.innerHTML = '<div class="process-empty">用户后台未配置允许访问路径。</div>';
+      } else {
+        processList.appendChild(emptyProcessMessage("从上方可访问路径启动终端，或在目录选择器中添加子目录。"));
+      }
       return;
     }
     for (const folder of folders) {
@@ -885,6 +1104,13 @@
       }
       processList.appendChild(group);
     }
+  }
+
+  function emptyProcessMessage(text) {
+    const node = document.createElement("div");
+    node.className = "process-empty";
+    node.textContent = text;
+    return node;
   }
 
   function renderFolderAgentMenu(container, folder) {
@@ -1229,6 +1455,10 @@
   }
 
   async function loadFiles(path) {
+    if (tunnelUnavailableForUser()) {
+      fileList.innerHTML = '<div class="empty">本地穿透未开启，文件不可访问。</div>';
+      return;
+    }
     if (!path) {
       return;
     }
@@ -1272,6 +1502,9 @@
   }
 
   async function openFile(path) {
+    if (tunnelUnavailableForUser()) {
+      return;
+    }
     selectedFile = path;
     try {
       const data = await fetchJSON(`/cloud-terminal-api/workbench/file?path=${encodeURIComponent(path)}`);
@@ -1287,6 +1520,10 @@
   }
 
   async function loadDiff(path) {
+    if (tunnelUnavailableForUser()) {
+      diffOutput.textContent = "本地穿透未开启，Diff 不可访问。";
+      return;
+    }
     const params = new URLSearchParams({ work_dir: activeWorkDir() || currentPath || "" });
     if (path) {
       params.set("path", path);
@@ -1324,16 +1561,32 @@
   }
 
   function activateTab(tab) {
-    if (!agentStarted && tab !== "terminal") {
+    if (tunnelUnavailableForUser() && tab !== "settings") {
+      showTunnelBlocked();
       return;
     }
+    if (!agentStarted && tab !== "terminal" && tab !== "settings") {
+      return;
+    }
+    if (!agentStarted && tab === "terminal") {
+      tunnelBlockedView.hidden = true;
+      targetView.hidden = false;
+      terminalPage.hidden = true;
+      keybar.hidden = true;
+      activeTab = "terminal";
+      setActivePage("terminal");
+      setActiveTabButton("terminal");
+      return;
+    }
+    if (!agentStarted && tab === "settings") {
+      tunnelBlockedView.hidden = true;
+      targetView.hidden = true;
+      terminalPage.hidden = true;
+      keybar.hidden = true;
+    }
     activeTab = tab;
-    document.querySelectorAll("[data-page]").forEach((page) => {
-      page.classList.toggle("active", page.dataset.page === tab);
-    });
-    document.querySelectorAll("[data-tab]").forEach((button) => {
-      button.classList.toggle("active", button.dataset.tab === tab);
-    });
+    setActivePage(tab);
+    setActiveTabButton(tab);
     if (tab === "terminal") {
       fitTerminal();
       if (terminal) {
@@ -1360,6 +1613,9 @@
   }
 
   function openPreview(forceReload) {
+    if (tunnelUnavailableForUser()) {
+      return;
+    }
     const port = previewPort.value;
     if (!port) {
       return;
@@ -1374,9 +1630,24 @@
     stopSessionButton.disabled = value === "Finished" || value === "Detached" || value === "Choose target";
   }
 
+  function setActiveTabButton(tab) {
+    document.querySelectorAll("[data-tab]").forEach((button) => {
+      button.classList.toggle("active", button.dataset.tab === tab);
+    });
+  }
+
+  function setActivePage(tab) {
+    document.querySelectorAll("[data-page]").forEach((page) => {
+      page.classList.toggle("active", page.dataset.page === tab);
+    });
+  }
+
   function setAuthBusy(busy) {
-    tokenInput.disabled = busy;
-    authForm.querySelector("button").disabled = busy;
+    usernameInput.disabled = busy;
+    passwordInput.disabled = busy;
+    authForm.querySelectorAll("button").forEach((button) => {
+      button.disabled = busy;
+    });
   }
 
   function setAuthMessage(value) {
@@ -1385,10 +1656,12 @@
 
   function setWorkbenchTabsEnabled(enabled) {
     document.querySelectorAll("[data-tab]").forEach((button) => {
-      button.disabled = !enabled && button.dataset.tab !== "terminal";
+      button.disabled = !enabled && button.dataset.tab !== "settings";
     });
-    reconnectButton.disabled = !sessionID;
+    reconnectButton.disabled = !enabled || !sessionID;
     stopSessionButton.disabled = !enabled || !sessionID;
+    newSessionButton.disabled = !enabled;
+    processButton.disabled = !enabled;
   }
 
   function renderAgentSelector() {
@@ -1628,6 +1901,33 @@
     }
   }
 
+  function reconcileSavedTargetWithState() {
+    if (selectedTarget && pathAllowedByState(selectedTarget.workDir)) {
+      return;
+    }
+    const firstRoot = Array.isArray(state?.allow_paths) ? state.allow_paths[0] : "";
+    if (firstRoot) {
+      selectedTarget = { kind: "dir", path: firstRoot, workDir: firstRoot, label: firstRoot };
+      localStorage.setItem(TARGET_KEY, JSON.stringify(selectedTarget));
+      return;
+    }
+    selectedTarget = null;
+    localStorage.removeItem(TARGET_KEY);
+  }
+
+  function pathAllowedByState(path) {
+    path = String(path || "");
+    const roots = Array.isArray(state?.allow_paths) ? state.allow_paths : [];
+    return roots.some((root) => {
+      root = String(root || "");
+      if (!root) {
+        return false;
+      }
+      const normalized = root.replace(/\/+$/, "") || "/";
+      return path === root || path === normalized || (normalized !== "/" && path.startsWith(normalized + "/"));
+    });
+  }
+
   function readSavedFolders() {
     try {
       const value = JSON.parse(localStorage.getItem(folderKey()) || "[]");
@@ -1661,6 +1961,29 @@
 
   function persistSet(key, value) {
     localStorage.setItem(key, JSON.stringify(Array.from(value)));
+  }
+
+  function lines(values) {
+    return Array.isArray(values) ? values.join("\n") : "";
+  }
+
+  function splitLines(value) {
+    return String(value || "")
+      .split(/\r?\n/)
+      .map((item) => item.trim())
+      .filter(Boolean);
+  }
+
+  function avatarText(value) {
+    const cleaned = String(value || "xm").trim();
+    return cleaned.slice(0, 2).toLowerCase();
+  }
+
+  function cssEscape(value) {
+    if (window.CSS && typeof window.CSS.escape === "function") {
+      return window.CSS.escape(value);
+    }
+    return String(value).replace(/["\\]/g, "\\$&");
   }
 
   function escapeHTML(value) {

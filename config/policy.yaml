@@ -1,7 +1,10 @@
 server:
     addr: 127.0.0.1:18001
-    auth_token: "1"
-    admin_token: admin-token-change-me
+    admin_username: admin
+    admin_password: admin123456
+    database_path: data/xmux.db
+    account_store_path: data/accounts.json
+    account_registration_enabled: true
     audit_log_path: data/audit.jsonl
     allow_hosts:
         - 127.0.0.1:18001
@@ -9,6 +12,9 @@ server:
     admin_ip_allowlist:
         - 127.0.0.1
         - ::1
+cloud_tunnel:
+    enabled: false
+    gateway_url: ""
 edge:
     id: local-edge
     name: Local Developer Edge

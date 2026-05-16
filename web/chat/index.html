@@ -3,18 +3,24 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-    <title>AI Chat</title>
+    <title>xmux Chat</title>
     <link rel="stylesheet" href="/chat/styles.css" />
   </head>
   <body>
     <main class="chat-app">
       <section id="authView" class="auth-view">
         <form id="authForm" class="auth-card">
-          <div class="app-mark">AI</div>
-          <h1>AI Chat</h1>
+          <div class="app-mark">xm</div>
+          <h1>xmux</h1>
           <p>在手机上继续电脑上的 AI CLI 会话</p>
-          <label for="tokenInput">Access token</label>
-          <input id="tokenInput" type="password" autocomplete="off" placeholder="输入终端鉴权 token" />
+          <div class="auth-tabs" role="tablist" aria-label="登录方式">
+            <button id="loginModeButton" class="active" type="button">登录</button>
+            <button id="registerModeButton" type="button">注册</button>
+          </div>
+          <label id="usernameLabel" for="usernameInput">账号</label>
+          <input id="usernameInput" autocomplete="username" placeholder="用户名或邮箱" />
+          <label id="passwordLabel" for="passwordInput">密码</label>
+          <input id="passwordInput" type="password" autocomplete="current-password" placeholder="云端账号密码" />
           <button type="submit">继续</button>
           <span id="authMessage" class="auth-message"></span>
         </form>
@@ -24,9 +30,9 @@
         <header class="app-header">
           <div class="header-inner">
             <div class="brand-row">
-              <div class="app-mark small">AI</div>
+              <div class="app-mark small">xm</div>
               <div>
-                <strong>AI Chat</strong>
+                <strong>xmux</strong>
               <span id="connectionState">Disconnected</span>
               </div>
             </div>

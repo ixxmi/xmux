@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>xmux User</title>
+    <link rel="stylesheet" href="/user/styles.css" />
+  </head>
+  <body>
+    <main class="login-shell">
+      <form id="loginForm" class="login-box">
+        <div class="login-mark">xm</div>
+        <h1>xmux</h1>
+        <p class="login-subtitle">用户后台</p>
+        <label>账号<input id="usernameInput" autocomplete="username" placeholder="用户名或邮箱" /></label>
+        <label>密码<input id="passwordInput" type="password" autocomplete="current-password" placeholder="账号密码" /></label>
+        <div class="login-actions">
+          <button type="submit">登录</button>
+          <button id="registerButton" class="secondary" type="button">注册</button>
+        </div>
+        <p id="loginMessage" class="login-message"></p>
+      </form>
+    </main>
+    <script src="/user/login.js"></script>
+  </body>
+</html>

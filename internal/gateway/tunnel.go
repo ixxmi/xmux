@@ -10,6 +10,8 @@ import (
 	"sync"
 	"time"
 
+	"cloud-terminal/internal/config"
+
 	"github.com/gorilla/websocket"
 )
 
@@ -61,8 +63,10 @@ type TunnelHello = tunnelHello
 type tunnelStartSessionRequest struct {
 	SessionID string   `json:"session_id"`
 	RequestID string   `json:"request_id"`
+	Account   string   `json:"account,omitempty"`
 	Agent     string   `json:"agent"`
 	Command   string   `json:"command"`
+	Bin       string   `json:"bin,omitempty"`
 	WorkDir   string   `json:"work_dir"`
 	Target    string   `json:"target,omitempty"`
 	Args      []string `json:"args,omitempty"`
@@ -153,6 +157,7 @@ type tunnelClient struct {
 
 	mu           sync.Mutex
 	closed       bool
+	account      string
 	edgeID       string
 	edgeName     string
 	workDir      string
@@ -167,6 +172,7 @@ type tunnelClient struct {
 }
 
 type tunnelClientInfo struct {
+	account      string
 	edgeID       string
 	edgeName     string
 	workDir      string
@@ -179,21 +185,26 @@ type tunnelClientInfo struct {
 type tunnelHub struct {
 	logger *slog.Logger
 
-	mu     sync.RWMutex
-	client *tunnelClient
+	mu             sync.RWMutex
+	defaultAccount string
+	clients        map[string]*tunnelClient
+	config         interface {
+		Snapshot() config.Config
+	}
 }
 
 func newTunnelHub(logger *slog.Logger) *tunnelHub {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &tunnelHub{logger: logger}
+	return &tunnelHub{logger: logger, clients: make(map[string]*tunnelClient)}
 }
 
 func (h *tunnelHub) set(client *tunnelClient) {
+	account := normalizeTunnelAccount(client.account)
 	h.mu.Lock()
-	old := h.client
-	h.client = client
+	old := h.clients[account]
+	h.clients[account] = client
 	h.mu.Unlock()
 	if old != nil && old != client {
 		old.close()
@@ -201,29 +212,77 @@ func (h *tunnelHub) set(client *tunnelClient) {
 }
 
 func (h *tunnelHub) clear(client *tunnelClient) {
+	account := normalizeTunnelAccount(client.account)
 	h.mu.Lock()
-	if h.client == client {
-		h.client = nil
+	if h.clients[account] == client {
+		delete(h.clients, account)
 	}
 	h.mu.Unlock()
 }
 
 func (h *tunnelHub) current() *tunnelClient {
+	return h.currentForAccount("")
+}
+
+func (h *tunnelHub) currentForAccount(account string) *tunnelClient {
+	account = normalizeTunnelAccount(account)
 	h.mu.RLock()
 	defer h.mu.RUnlock()
-	return h.client
+	if client := h.clients[account]; client != nil {
+		return client
+	}
+	if h.defaultAccount != "" && h.defaultAccount != account {
+		return h.clients[h.defaultAccount]
+	}
+	return nil
 }
 
 func (h *tunnelHub) online() bool {
-	return h.current() != nil
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return len(h.clients) > 0
+}
+
+func (h *tunnelHub) onlineForAccount(account string) bool {
+	return h.currentForAccount(account) != nil
 }
 
 func (h *tunnelHub) setSessionSink(sink func(workbenchServerMessage)) {
-	if client := h.current(); client != nil {
+	h.mu.RLock()
+	clients := make([]*tunnelClient, 0, len(h.clients))
+	for _, client := range h.clients {
+		clients = append(clients, client)
+	}
+	h.mu.RUnlock()
+	for _, client := range clients {
 		client.mu.Lock()
 		client.sessionSink = sink
 		client.mu.Unlock()
 	}
+}
+
+func (h *tunnelHub) setDefaultAccount(account string) {
+	h.mu.Lock()
+	h.defaultAccount = normalizeTunnelAccount(account)
+	h.mu.Unlock()
+}
+
+func (h *tunnelHub) setConfigStore(store interface {
+	Snapshot() config.Config
+}) {
+	h.mu.Lock()
+	h.config = store
+	h.mu.Unlock()
+}
+
+func (h *tunnelHub) configSnapshot() config.Config {
+	h.mu.RLock()
+	store := h.config
+	h.mu.RUnlock()
+	if store == nil {
+		return config.Config{}
+	}
+	return store.Snapshot()
 }
 
 func (c *tunnelClient) close() {
@@ -241,6 +300,7 @@ func (c *tunnelClient) info() tunnelClientInfo {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return tunnelClientInfo{
+		account:      c.account,
 		edgeID:       c.edgeID,
 		edgeName:     c.edgeName,
 		workDir:      c.workDir,
@@ -436,4 +496,8 @@ func DecodeTunnelPayload(raw JSONRawEnvelope, out any) error {
 
 func tunnelUnavailable() error {
 	return fmt.Errorf("no local edge agent is connected")
+}
+
+func normalizeTunnelAccount(account string) string {
+	return strings.TrimSpace(strings.ToLower(account))
 }

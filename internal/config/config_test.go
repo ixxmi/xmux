@@ -30,14 +30,23 @@ func TestEnsureCreatesDefaultConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load() generated config error = %v", err)
 	}
-	if cfg.Server.AuthToken != "change-me-terminal-token" {
-		t.Fatalf("Server.AuthToken = %q", cfg.Server.AuthToken)
-	}
-	if cfg.Server.AdminToken != "change-me-admin-token" {
-		t.Fatalf("Server.AdminToken = %q", cfg.Server.AdminToken)
-	}
 	if cfg.Server.Addr != "127.0.0.1:18001" {
 		t.Fatalf("Server.Addr = %q", cfg.Server.Addr)
+	}
+	if cfg.Server.AdminUsername != "admin" {
+		t.Fatalf("Server.AdminUsername = %q", cfg.Server.AdminUsername)
+	}
+	if cfg.Server.AdminPassword != "admin123456" {
+		t.Fatalf("Server.AdminPassword = %q", cfg.Server.AdminPassword)
+	}
+	if cfg.Server.DatabasePath != "data/xmux.db" {
+		t.Fatalf("Server.DatabasePath = %q", cfg.Server.DatabasePath)
+	}
+	if cfg.Server.AccountStorePath != "data/accounts.json" {
+		t.Fatalf("Server.AccountStorePath = %q", cfg.Server.AccountStorePath)
+	}
+	if !cfg.Server.RegistrationEnabled() {
+		t.Fatal("Server.AccountRegistrationEnabled = false, want true")
 	}
 	for _, command := range []string{"codex", "claude", "gemini"} {
 		rule, ok := cfg.Policy.Commands[command]

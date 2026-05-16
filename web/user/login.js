@@ -8,44 +8,35 @@ usernameInput.focus();
 
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
-  await submitAccount("/cloud-terminal-api/accounts/login", true);
+  await submitAccount("/cloud-terminal-api/accounts/login");
 });
 
 registerButton.addEventListener("click", async () => {
-  await submitAccount("/cloud-terminal-api/accounts/register", false);
+  await submitAccount("/cloud-terminal-api/accounts/register");
 });
 
-async function submitAccount(path, requireAdmin) {
+async function submitAccount(path) {
   const username = usernameInput.value.trim();
   const password = passwordInput.value;
   if (!username || !password) {
-    message.textContent = "Account and password are required.";
+    message.textContent = "账号和密码不能为空";
     return;
   }
   setBusy(true);
-  message.textContent = "Verifying...";
+  message.textContent = "验证中...";
   try {
     const response = await fetch(path, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
+      credentials: "same-origin",
       body: JSON.stringify({ username, password })
     });
     if (!response.ok) {
       throw new Error(await response.text());
     }
-    const result = await response.json();
-    if (requireAdmin && result.role !== "admin") {
-      await fetch("/cloud-terminal-api/accounts/logout", { method: "POST" });
-      throw new Error("Administrator account required.");
-    }
-    if (!requireAdmin) {
-      message.textContent = "Account created. Ask an administrator to grant admin access before opening the console.";
-      passwordInput.value = "";
-      return;
-    }
-    window.location.href = "/admin/";
+    window.location.href = "/user/";
   } catch (error) {
-    message.textContent = cleanError(error.message || "Login rejected.");
+    message.textContent = cleanError(error.message || "登录失败");
   } finally {
     setBusy(false);
   }
@@ -60,5 +51,5 @@ function setBusy(busy) {
 }
 
 function cleanError(value) {
-  return String(value).replace(/^\\d+\\s*/, "").trim();
+  return String(value).replace(/^\d+\s*/, "").trim();
 }

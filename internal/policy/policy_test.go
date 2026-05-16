@@ -49,6 +49,28 @@ func TestDecideCarriesInteractiveFlag(t *testing.T) {
 	}
 }
 
+func TestDecideAllowsInteractiveBinaryOverride(t *testing.T) {
+	t.Parallel()
+
+	engine, err := NewEngine(Config{Commands: map[string]CommandPolicy{
+		"codex": {Enabled: true, Interactive: true, MaxArgs: 4},
+	}})
+	if err != nil {
+		t.Fatalf("NewEngine: %v", err)
+	}
+
+	decision, err := engine.Decide("codex", []string{"/opt/homebrew/bin/codex", "--model", "gpt-5"})
+	if err != nil {
+		t.Fatalf("Decide codex: %v", err)
+	}
+	if decision.Bin != "/opt/homebrew/bin/codex" {
+		t.Fatalf("bin = %q, want override", decision.Bin)
+	}
+	if len(decision.Args) != 2 || decision.Args[0] != "--model" || decision.Args[1] != "gpt-5" {
+		t.Fatalf("args = %v, want override stripped", decision.Args)
+	}
+}
+
 func TestDecideRejectsDeniedCommand(t *testing.T) {
 	t.Parallel()
 

@@ -6,15 +6,18 @@ import (
 	"fmt"
 	"path/filepath"
 	"slices"
-	"strings"
 
 	"cloud-terminal/internal/config"
 	"cloud-terminal/internal/edge"
+	"cloud-terminal/internal/policy"
 	"cloud-terminal/internal/shellparse"
 )
 
 type tunnelRuntime struct {
-	hub *tunnelHub
+	hub            *tunnelHub
+	policyResolver interface {
+		UserPolicy(string, policy.Config) (policy.Config, error)
+	}
 }
 
 type tunnelInteractiveSession struct {
@@ -28,15 +31,17 @@ func newTunnelRuntime(hub *tunnelHub) *tunnelRuntime {
 }
 
 func (r *tunnelRuntime) ResolveWorkbenchStart(opts workbenchStartOptions) (workbenchStartResolution, error) {
-	client := r.hub.current()
+	client := r.clientForAccount(opts.Account)
 	if client == nil {
 		return workbenchStartResolution{}, tunnelUnavailable()
 	}
 	info := client.info()
+	policyCfg := r.policyForAccount(opts.Account)
+	allowPaths := filterAllowedPaths(info.allowPaths, policyCfg.AllowPaths)
 
 	agentID := normalizeWorkbenchAgentID(opts.Agent)
 	var selected workbenchAgentInfo
-	for _, agent := range info.agents {
+	for _, agent := range filterWorkbenchAgentsForPolicy(info.agents, policyCfg) {
 		if normalizeWorkbenchAgentID(agent.ID) == agentID {
 			selected = agent
 			break
@@ -48,10 +53,6 @@ func (r *tunnelRuntime) ResolveWorkbenchStart(opts workbenchStartOptions) (workb
 	if !selected.Enabled {
 		return workbenchStartResolution{}, fmt.Errorf("%s is not enabled in local edge policy", selected.Label)
 	}
-	command := strings.TrimSpace(selected.Command)
-	if command == "" {
-		command = agentID
-	}
 
 	workDir := config.NormalizePath(opts.WorkDir)
 	if workDir == "" {
@@ -60,14 +61,14 @@ func (r *tunnelRuntime) ResolveWorkbenchStart(opts workbenchStartOptions) (workb
 	target := config.NormalizePath(opts.Target)
 	var args []string
 	if target != "" {
-		if !pathWithinAllowed(target, info.allowPaths) {
+		if !pathWithinAllowed(target, allowPaths) {
 			return workbenchStartResolution{}, errors.New("target is outside local edge allowed roots")
 		}
-		if workDir == "" || !pathWithinAllowed(workDir, info.allowPaths) {
+		if workDir == "" || !pathWithinAllowed(workDir, allowPaths) {
 			workDir = filepath.Dir(target)
 		}
 		args = []string{target}
-	} else if workDir != "" && !pathWithinAllowed(workDir, info.allowPaths) {
+	} else if workDir != "" && !pathWithinAllowed(workDir, allowPaths) {
 		return workbenchStartResolution{}, errors.New("work_dir is outside local edge allowed roots")
 	}
 	if workDir == "" {
@@ -77,7 +78,7 @@ func (r *tunnelRuntime) ResolveWorkbenchStart(opts workbenchStartOptions) (workb
 	return workbenchStartResolution{
 		EdgeID:   firstNonEmpty(info.edgeID, "local-edge"),
 		EdgeName: firstNonEmpty(info.edgeName, info.edgeID, "Local Edge"),
-		Agent:    workbenchAgent{ID: agentID, Command: command},
+		Agent:    workbenchAgent{ID: agentID, Command: firstNonEmpty(selected.Command, agentID)},
 		WorkDir:  workDir,
 		Target:   target,
 		Args:     slices.Clone(args),
@@ -115,23 +116,31 @@ func (r *tunnelRuntime) ParseAndStartInteractive(ctx context.Context, req edge.E
 }
 
 func (r *tunnelRuntime) StartInteractive(ctx context.Context, req edge.ExecRequest, _ edge.InteractiveOptions) (InteractiveSession, error) {
-	client := r.hub.current()
+	client := r.clientForAccount(req.User)
 	if client == nil {
 		return nil, tunnelUnavailable()
 	}
-	agent := strings.TrimSpace(req.Command)
+	agent := normalizeWorkbenchAgentID(req.Command)
 	if agent == "" {
 		agent = "codex"
+	}
+	bin := ""
+	args := slices.Clone(req.Args)
+	if len(args) > 0 && filepath.IsAbs(config.NormalizePath(args[0])) {
+		bin = args[0]
+		args = args[1:]
 	}
 	var out tunnelStartSessionResponse
 	err := client.request(ctx, "start_session", tunnelStartSessionRequest{
 		SessionID: req.SessionID,
 		RequestID: req.RequestID,
+		Account:   req.User,
 		Agent:     agent,
-		Command:   req.Command,
+		Command:   agent,
+		Bin:       bin,
 		WorkDir:   req.WorkDir,
-		Target:    firstNonEmpty(req.Args...),
-		Args:      req.Args,
+		Target:    firstPathArg(args),
+		Args:      args,
 		Rows:      req.Rows,
 		Cols:      req.Cols,
 	}, &out)
@@ -161,6 +170,44 @@ func (r *tunnelRuntime) StartInteractive(ctx context.Context, req edge.ExecReque
 		close(done)
 	}()
 	return session, nil
+}
+
+func (r *tunnelRuntime) clientForAccount(account string) *tunnelClient {
+	if r == nil || r.hub == nil {
+		return nil
+	}
+	return r.hub.currentForAccount(account)
+}
+
+func (r *tunnelRuntime) SetUserPolicyResolver(resolver interface {
+	UserPolicy(string, policy.Config) (policy.Config, error)
+}) {
+	r.policyResolver = resolver
+}
+
+func (r *tunnelRuntime) policyForAccount(account string) policy.Config {
+	if r == nil || r.hub == nil {
+		return policy.Config{}
+	}
+	cfg := r.hub.configSnapshot()
+	if r.policyResolver == nil {
+		return cfg.Policy
+	}
+	resolved, err := r.policyResolver.UserPolicy(account, cfg.Policy)
+	if err != nil {
+		return cfg.Policy
+	}
+	return resolved
+}
+
+func firstPathArg(args []string) string {
+	for _, arg := range args {
+		arg = config.NormalizePath(arg)
+		if arg != "" && filepath.IsAbs(arg) {
+			return arg
+		}
+	}
+	return ""
 }
 
 func (s *tunnelInteractiveSession) Write(data []byte) error {

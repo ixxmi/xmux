@@ -1,22 +1,27 @@
-let token = new URLSearchParams(window.location.search).get("token") || sessionStorage.getItem("cloud-terminal-admin-token") || "";
-if (!token) {
-  window.location.href = "/admin/login.html";
-}
-
 const state = {
   config: null,
   currentPath: "",
   currentEntries: [],
-  selectedCommand: ""
+  selectedCommand: "",
+  account: null
 };
 
 const els = {
   saveState: document.getElementById("saveState"),
   saveButton: document.getElementById("saveButton"),
   sectionEyebrow: document.getElementById("sectionEyebrow"),
-  authToken: document.getElementById("authToken"),
-  adminToken: document.getElementById("adminToken"),
-  tunnelToken: document.getElementById("tunnelToken"),
+  databasePath: document.getElementById("databasePath"),
+  accountRegistrationEnabled: document.getElementById("accountRegistrationEnabled"),
+  refreshAccounts: document.getElementById("refreshAccounts"),
+  accountList: document.getElementById("accountList"),
+  cloudTunnelEnabled: document.getElementById("cloudTunnelEnabled"),
+  cloudGatewayURL: document.getElementById("cloudGatewayURL"),
+  cloudTunnelAccount: document.getElementById("cloudTunnelAccount"),
+  bindTunnelAccount: document.getElementById("bindTunnelAccount"),
+  newAccountUsername: document.getElementById("newAccountUsername"),
+  newAccountPassword: document.getElementById("newAccountPassword"),
+  newAccountRole: document.getElementById("newAccountRole"),
+  createAccount: document.getElementById("createAccount"),
   allowHosts: document.getElementById("allowHosts"),
   adminIPs: document.getElementById("adminIPs"),
   denyList: document.getElementById("denyList"),
@@ -37,7 +42,22 @@ const els = {
   rootButton: document.getElementById("rootButton"),
   upButton: document.getElementById("upButton"),
   currentPath: document.getElementById("currentPath"),
-  fileList: document.getElementById("fileList")
+  fileList: document.getElementById("fileList"),
+  accountMenu: document.getElementById("accountMenu"),
+  accountTrigger: document.getElementById("accountTrigger"),
+  accountDropdown: document.getElementById("accountDropdown"),
+  accountAvatar: document.getElementById("accountAvatar"),
+  accountName: document.getElementById("accountName"),
+  accountRole: document.getElementById("accountRole"),
+  profileButton: document.getElementById("profileButton"),
+  logoutButton: document.getElementById("logoutButton"),
+  profileModal: document.getElementById("profileModal"),
+  profileUsername: document.getElementById("profileUsername"),
+  profileRoleInput: document.getElementById("profileRoleInput"),
+  profileCurrentPassword: document.getElementById("profileCurrentPassword"),
+  profileNewPassword: document.getElementById("profileNewPassword"),
+  profileMessage: document.getElementById("profileMessage"),
+  profileSaveButton: document.getElementById("profileSaveButton")
 };
 
 document.querySelectorAll(".nav-item").forEach((button) => {
@@ -48,6 +68,13 @@ document.querySelectorAll("[data-command-tab]").forEach((button) => {
 });
 
 els.saveButton.addEventListener("click", saveConfig);
+els.refreshAccounts.addEventListener("click", loadAccounts);
+els.bindTunnelAccount.addEventListener("click", () => {
+  state.bindTunnelAccount = true;
+  markDirty();
+  els.cloudTunnelAccount.textContent = "保存后使用当前用户";
+});
+els.createAccount.addEventListener("click", createAccount);
 els.addCommand.addEventListener("click", () => addCommand(`command_${Object.keys(state.config.commands).length + 1}`));
 els.deleteCommand.addEventListener("click", deleteSelectedCommand);
 els.rootButton.addEventListener("click", () => loadFS("/"));
@@ -58,10 +85,35 @@ els.upButton.addEventListener("click", () => {
   }
 });
 
+els.accountTrigger.addEventListener("click", (event) => {
+  event.stopPropagation();
+  toggleAccountDropdown();
+});
+els.profileButton.addEventListener("click", () => {
+  closeAccountDropdown();
+  openProfileModal();
+});
+els.logoutButton.addEventListener("click", logout);
+els.profileSaveButton.addEventListener("click", saveProfile);
+document.querySelectorAll("[data-modal-close]").forEach((node) => {
+  node.addEventListener("click", closeProfileModal);
+});
+document.addEventListener("click", (event) => {
+  if (!els.accountMenu.contains(event.target)) {
+    closeAccountDropdown();
+  }
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") {
+    closeAccountDropdown();
+    closeProfileModal();
+  }
+});
+
 [
-  els.authToken,
-  els.adminToken,
-  els.tunnelToken,
+  els.accountRegistrationEnabled,
+  els.cloudTunnelEnabled,
+  els.cloudGatewayURL,
   els.allowHosts,
   els.adminIPs,
   els.denyList,
@@ -81,11 +133,131 @@ els.upButton.addEventListener("click", () => {
 }));
 
 loadConfig();
+loadAccountIdentity();
+
+async function loadAccountIdentity() {
+  try {
+    const response = await api("/cloud-terminal-api/accounts/me");
+    const data = await response.json();
+    setAccountIdentity(data);
+  } catch (error) {
+    // ignore, redirect handled by api()
+  }
+}
+
+function setAccountIdentity(data) {
+  state.account = data;
+  const username = data?.username || "-";
+  const role = data?.role || "user";
+  els.accountName.textContent = username;
+  els.accountRole.textContent = role;
+  els.accountAvatar.textContent = buildAvatarInitials(username);
+  els.accountTrigger.setAttribute("title", `${username} · ${role}`);
+}
+
+function buildAvatarInitials(name) {
+  const trimmed = String(name || "").trim();
+  if (!trimmed) {
+    return "--";
+  }
+  const parts = trimmed.split(/[\s@._-]+/).filter(Boolean);
+  if (parts.length >= 2) {
+    return (parts[0][0] + parts[1][0]).toUpperCase();
+  }
+  return trimmed.slice(0, 2).toUpperCase();
+}
+
+function toggleAccountDropdown() {
+  const open = !els.accountDropdown.hidden;
+  if (open) {
+    closeAccountDropdown();
+  } else {
+    els.accountDropdown.hidden = false;
+    els.accountTrigger.setAttribute("aria-expanded", "true");
+  }
+}
+
+function closeAccountDropdown() {
+  if (els.accountDropdown.hidden) {
+    return;
+  }
+  els.accountDropdown.hidden = true;
+  els.accountTrigger.setAttribute("aria-expanded", "false");
+}
+
+function openProfileModal() {
+  els.profileUsername.value = state.account?.username || "";
+  els.profileRoleInput.value = state.account?.role || "";
+  els.profileCurrentPassword.value = "";
+  els.profileNewPassword.value = "";
+  setProfileMessage("", "");
+  els.profileModal.hidden = false;
+  setTimeout(() => els.profileCurrentPassword.focus(), 0);
+}
+
+function closeProfileModal() {
+  els.profileModal.hidden = true;
+}
+
+async function saveProfile() {
+  const currentPassword = els.profileCurrentPassword.value;
+  const newPassword = els.profileNewPassword.value;
+  if (!currentPassword || !newPassword) {
+    setProfileMessage("请填写当前密码和新密码", "error");
+    return;
+  }
+  if (newPassword.length < 8) {
+    setProfileMessage("新密码至少需要 8 位", "error");
+    return;
+  }
+  els.profileSaveButton.disabled = true;
+  setProfileMessage("正在保存...", "");
+  try {
+    const response = await api("/cloud-terminal-api/accounts/me", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ current_password: currentPassword, new_password: newPassword })
+    });
+    const data = await response.json();
+    setAccountIdentity(data);
+    setProfileMessage("密码已更新", "ok");
+    els.profileCurrentPassword.value = "";
+    els.profileNewPassword.value = "";
+    setTimeout(closeProfileModal, 800);
+  } catch (error) {
+    setProfileMessage(cleanProfileError(error.message), "error");
+  } finally {
+    els.profileSaveButton.disabled = false;
+  }
+}
+
+function setProfileMessage(text, tone) {
+  els.profileMessage.textContent = text;
+  els.profileMessage.className = "modal-message";
+  if (tone) {
+    els.profileMessage.classList.add(tone);
+  }
+}
+
+function cleanProfileError(value) {
+  return String(value || "保存失败").replace(/^\d+\s*/, "").trim() || "保存失败";
+}
+
+async function logout() {
+  closeAccountDropdown();
+  try {
+    await fetch("/cloud-terminal-api/accounts/logout", { method: "POST", credentials: "same-origin" });
+  } catch {
+    // ignore network errors and continue to redirect
+  }
+  window.location.href = "/admin/login.html";
+}
 
 async function loadConfig() {
   const response = await api("/cloud-terminal-api/admin/config");
   state.config = await response.json();
   renderConfig();
+  await loadAccounts();
   await loadFS("/");
 }
 
@@ -99,9 +271,11 @@ function switchSection(section) {
 }
 
 function renderConfig() {
-  els.authToken.value = state.config.auth_token || "";
-  els.adminToken.value = state.config.admin_token || "";
-  els.tunnelToken.value = state.config.tunnel_token || "";
+  els.databasePath.value = state.config.database_path || "";
+  els.accountRegistrationEnabled.checked = Boolean(state.config.account_registration_enabled);
+  els.cloudTunnelEnabled.checked = Boolean(state.config.cloud_tunnel?.enabled);
+  els.cloudGatewayURL.value = state.config.cloud_tunnel?.gateway_url || "";
+  els.cloudTunnelAccount.textContent = state.config.cloud_tunnel?.bound ? `已绑定：${state.config.cloud_tunnel.account}` : "未绑定账号";
   els.allowHosts.value = lines(state.config.allow_hosts);
   els.adminIPs.value = lines(state.config.admin_ip_allowlist);
   els.denyList.value = lines(state.config.deny);
@@ -176,9 +350,13 @@ function syncEditorToState() {
 function collectConfig() {
   syncEditorToState();
   return {
-    auth_token: els.authToken.value.trim(),
-    admin_token: els.adminToken.value.trim(),
-    tunnel_token: els.tunnelToken.value.trim(),
+    database_path: els.databasePath.value.trim(),
+    account_registration_enabled: els.accountRegistrationEnabled.checked,
+    cloud_tunnel: {
+      enabled: els.cloudTunnelEnabled.checked,
+      gateway_url: els.cloudGatewayURL.value.trim(),
+      use_current_account: Boolean(state.bindTunnelAccount)
+    },
     allow_hosts: splitLines(els.allowHosts.value),
     admin_ip_allowlist: splitLines(els.adminIPs.value),
     deny: splitLines(els.denyList.value),
@@ -196,12 +374,60 @@ async function saveConfig() {
       body: JSON.stringify(collectConfig())
     });
     state.config = await response.json();
-    sessionStorage.setItem("cloud-terminal-admin-token", state.config.admin_token);
-    token = state.config.admin_token;
+    state.bindTunnelAccount = false;
     renderConfig();
     els.saveState.textContent = "Saved, live";
+    await loadAccounts();
   } catch (error) {
     els.saveState.textContent = error.message;
+  }
+}
+
+async function createAccount() {
+  const username = els.newAccountUsername.value.trim();
+  const password = els.newAccountPassword.value;
+  const role = els.newAccountRole.value;
+  if (!username || !password) {
+    els.saveState.textContent = "账号和密码不能为空";
+    return;
+  }
+  try {
+    els.saveState.textContent = "Creating account...";
+    await api("/cloud-terminal-api/admin/accounts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, password, role })
+    });
+    els.newAccountUsername.value = "";
+    els.newAccountPassword.value = "";
+    els.saveState.textContent = "Account created";
+    await loadAccounts();
+  } catch (error) {
+    els.saveState.textContent = error.message;
+  }
+}
+
+async function loadAccounts() {
+  try {
+    const response = await api("/cloud-terminal-api/admin/accounts");
+    const data = await response.json();
+    renderAccounts(data.accounts || []);
+  } catch (error) {
+    els.accountList.textContent = error.message;
+  }
+}
+
+function renderAccounts(accounts) {
+  els.accountList.innerHTML = "";
+  if (!accounts.length) {
+    els.accountList.innerHTML = `<div class="empty-state small">还没有云账号。</div>`;
+    return;
+  }
+  for (const account of accounts) {
+    const row = document.createElement("div");
+    row.className = "account-row";
+    row.innerHTML = `<strong>${escapeText(account.username)}</strong><span>${escapeText(account.role || "user")} · ${escapeText(account.last_login_at || account.created_at || "")}</span>`;
+    els.accountList.appendChild(row);
   }
 }
 
@@ -333,10 +559,8 @@ function switchCommandTab(tab) {
 
 async function api(path, options = {}) {
   const headers = new Headers(options.headers || {});
-  headers.set("Authorization", `Bearer ${token}`);
   const response = await fetch(path, { ...options, headers });
   if (response.status === 401 || response.status === 403) {
-    sessionStorage.removeItem("cloud-terminal-admin-token");
     window.location.href = "/admin/login.html";
     throw new Error("Unauthorized");
   }

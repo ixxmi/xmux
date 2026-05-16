@@ -2,7 +2,6 @@ package gateway
 
 import (
 	"context"
-	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"io/fs"
@@ -32,6 +31,12 @@ type Runtime interface {
 	StartInteractive(context.Context, edge.ExecRequest, edge.InteractiveOptions) (InteractiveSession, error)
 }
 
+type userPolicyRuntime interface {
+	SetUserPolicyResolver(interface {
+		UserPolicy(string, policy.Config) (policy.Config, error)
+	})
+}
+
 type InteractiveSession interface {
 	Write([]byte) error
 	Resize(uint16, uint16) error
@@ -53,6 +58,8 @@ type Server struct {
 	runtime   Runtime
 	staticFS  fs.FS
 	config    *config.Store
+	accountMu sync.RWMutex
+	accounts  *accountStore
 	edgeID    string
 	edgeName  string
 	logger    *slog.Logger
@@ -65,21 +72,47 @@ func NewServer(opts Options) *Server {
 	if opts.Logger == nil {
 		opts.Logger = slog.Default()
 	}
+	if opts.Config == nil {
+		defaultConfig := config.Default()
+		opts.Config = config.NewStore("", &defaultConfig)
+	}
+	cfg := opts.Config.Snapshot()
+	if cfg.Server.AdminUsername == "" {
+		cfg.Server.AdminUsername = "admin"
+	}
+	if cfg.Server.AdminPassword == "" {
+		cfg.Server.AdminPassword = "admin123456"
+	}
+	accounts, err := newAccountStore(opts.Config.DatabasePath(), opts.Config.AccountStorePath(), opts.Config.AccountRegistrationEnabled(), cfg.Server.AdminUsername, cfg.Server.AdminPassword, cfg.Policy)
+	if err != nil {
+		opts.Logger.Warn("load account store", "path", opts.Config.DatabasePath(), "error", err)
+		accounts = newFallbackAccountStore(opts.Config.DatabasePath(), opts.Config.AccountStorePath(), opts.Config.AccountRegistrationEnabled(), cfg.Server.AdminUsername)
+		if err := accounts.ensureAdmin(cfg.Server.AdminUsername, cfg.Server.AdminPassword, cfg.Policy); err != nil {
+			opts.Logger.Warn("ensure default admin", "error", err)
+		}
+	}
 	tunnelHub := newTunnelHub(opts.Logger)
+	tunnelHub.setConfigStore(opts.Config)
+	tunnelHub.setDefaultAccount(cfg.CloudTunnel.Account)
 	runtime := opts.Runtime
 	if runtime == nil {
 		runtime = newTunnelRuntime(tunnelHub)
+	}
+	if configurable, ok := runtime.(userPolicyRuntime); ok {
+		configurable.SetUserPolicyResolver(accounts)
 	}
 	server := &Server{
 		runtime:  runtime,
 		staticFS: opts.StaticFS,
 		config:   opts.Config,
+		accounts: accounts,
 		edgeID:   opts.EdgeID,
 		edgeName: opts.EdgeName,
 		logger:   opts.Logger,
 		tunnel:   tunnelHub,
 	}
 	server.workbench = newWorkbenchManager(runtime, opts.Config, opts.EdgeID, opts.EdgeName, opts.WorkbenchStatePath, opts.Logger)
+	server.workbench.policyResolver = accounts
 	tunnelHub.setSessionSink(server.handleTunnelSessionMessage)
 	return server
 }
@@ -89,6 +122,12 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("/cloud-terminal-api/health", s.health)
 	mux.HandleFunc("/cloud-terminal-api/edge", s.withAuth(s.edgeInfo))
 	mux.HandleFunc("/cloud-terminal-api/complete", s.withAuth(s.complete))
+	mux.HandleFunc("/cloud-terminal-api/accounts/register", s.accountRegister)
+	mux.HandleFunc("/cloud-terminal-api/accounts/login", s.accountLogin)
+	mux.HandleFunc("/cloud-terminal-api/accounts/logout", s.accountLogout)
+	mux.HandleFunc("/cloud-terminal-api/accounts/me", s.accountMe)
+	mux.HandleFunc("/cloud-terminal-api/user/settings", s.withAccount(s.userSettings))
+	mux.HandleFunc("/cloud-terminal-api/user/fs", s.withAccount(s.userFS))
 	mux.HandleFunc("/cloud-terminal-api/workbench/auth", s.workbenchAuth)
 	mux.HandleFunc("/cloud-terminal-api/workbench/logout", s.workbenchLogout)
 	mux.HandleFunc("/cloud-terminal-api/workbench/state", s.withWorkbench(s.workbenchState))
@@ -99,6 +138,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("/cloud-terminal-api/workbench/preview", s.withWorkbench(s.workbenchPreview))
 	mux.HandleFunc("/preview/", s.withWorkbench(s.workbenchPreviewPath))
 	mux.HandleFunc("/cloud-terminal-api/admin/config", s.withAdmin(s.adminConfig))
+	mux.HandleFunc("/cloud-terminal-api/admin/accounts", s.withAdmin(s.adminAccounts))
 	mux.HandleFunc("/cloud-terminal-api/admin/fs", s.withAdmin(s.adminFS))
 	mux.HandleFunc("/cloud-terminal-api/ws/terminal", s.terminalWS)
 	mux.HandleFunc("/cloud-terminal-api/ws/workbench", s.workbenchWS)
@@ -106,6 +146,10 @@ func (s *Server) Routes() http.Handler {
 	if adminFS, err := fs.Sub(s.staticFS, "admin"); err == nil {
 		adminFiles := http.StripPrefix("/admin/", http.FileServer(http.FS(adminFS)))
 		mux.Handle("/admin/", s.withAdminStatic(adminFiles))
+	}
+	if userFS, err := fs.Sub(s.staticFS, "user"); err == nil {
+		userFiles := http.StripPrefix("/user/", http.FileServer(http.FS(userFS)))
+		mux.Handle("/user/", s.withUserStatic(userFiles))
 	}
 	mux.HandleFunc("/", s.serveRoot)
 	return s.securityHeaders(mux)
@@ -134,12 +178,21 @@ func (s *Server) runtimeIsTunnel() bool {
 	return ok
 }
 
-func (s *Server) edgeInfo(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) tunnelClientForAccount(account string) *tunnelClient {
+	s.tunnel.setDefaultAccount(s.config.Snapshot().CloudTunnel.Account)
+	if accounts := s.accountStore(); accounts != nil && !accounts.TunnelAllowed(account) {
+		return nil
+	}
+	return s.tunnel.currentForAccount(account)
+}
+
+func (s *Server) edgeInfo(w http.ResponseWriter, r *http.Request) {
+	account, _ := s.accountFromRequest(r)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"id":       s.edgeID,
 		"name":     s.edgeName,
 		"status":   "online",
-		"commands": s.commandCompletions(),
+		"commands": s.commandCompletionsForAccount(account),
 	})
 }
 
@@ -156,9 +209,11 @@ func (s *Server) complete(w http.ResponseWriter, r *http.Request) {
 
 	switch kind {
 	case "command":
-		writeJSON(w, http.StatusOK, completionResponse{Matches: filterPrefix(s.commandCompletions(), prefix)})
+		account, _ := s.accountFromRequest(r)
+		writeJSON(w, http.StatusOK, completionResponse{Matches: filterPrefix(s.commandCompletionsForAccount(account), prefix)})
 	case "path":
-		matches, err := s.pathCompletions(prefix, workDir)
+		account, _ := s.accountFromRequest(r)
+		matches, err := s.pathCompletionsForAccount(account, prefix, workDir)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -170,17 +225,27 @@ func (s *Server) complete(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) commandCompletions() []string {
+	return s.commandCompletionsForAccount("")
+}
+
+func (s *Server) commandCompletionsForAccount(account string) []string {
 	cfg := s.config.Snapshot()
-	denied := make(map[string]struct{}, len(cfg.Policy.Deny))
-	for _, command := range cfg.Policy.Deny {
+	policyCfg := cfg.Policy
+	if s.accountStore() != nil {
+		if resolved, err := s.accountStore().UserPolicy(account, cfg.Policy); err == nil {
+			policyCfg = resolved
+		}
+	}
+	denied := make(map[string]struct{}, len(policyCfg.Deny))
+	for _, command := range policyCfg.Deny {
 		command = strings.TrimSpace(command)
 		if command != "" {
 			denied[command] = struct{}{}
 		}
 	}
 
-	commands := make([]string, 0, len(cfg.Policy.Commands))
-	for name, rule := range cfg.Policy.Commands {
+	commands := make([]string, 0, len(policyCfg.Commands))
+	for name, rule := range policyCfg.Commands {
 		name = strings.TrimSpace(name)
 		if name == "" || !rule.Enabled {
 			continue
@@ -195,7 +260,17 @@ func (s *Server) commandCompletions() []string {
 }
 
 func (s *Server) pathCompletions(prefix string, workDir string) ([]string, error) {
+	return s.pathCompletionsForAccount("", prefix, workDir)
+}
+
+func (s *Server) pathCompletionsForAccount(account string, prefix string, workDir string) ([]string, error) {
 	cfg := s.config.Snapshot()
+	policyCfg := cfg.Policy
+	if s.accountStore() != nil {
+		if resolved, err := s.accountStore().UserPolicy(account, cfg.Policy); err == nil {
+			policyCfg = resolved
+		}
+	}
 	if workDir == "" {
 		workDir = config.NormalizePath(cfg.Edge.WorkDir)
 	}
@@ -204,7 +279,7 @@ func (s *Server) pathCompletions(prefix string, workDir string) ([]string, error
 	}
 
 	base, typed := splitCompletionPath(prefix, workDir)
-	if !pathWithinAllowed(base, cfg.Policy.AllowPaths) {
+	if !pathWithinAllowed(base, policyCfg.AllowPaths) {
 		return nil, nil
 	}
 
@@ -220,7 +295,7 @@ func (s *Server) pathCompletions(prefix string, workDir string) ([]string, error
 			continue
 		}
 		full := filepath.Join(base, name)
-		if !pathWithinAllowed(full, cfg.Policy.AllowPaths) {
+		if !pathWithinAllowed(full, policyCfg.AllowPaths) {
 			continue
 		}
 		value := completionValue(prefix, base, name, entry.IsDir())
@@ -231,7 +306,8 @@ func (s *Server) pathCompletions(prefix string, workDir string) ([]string, error
 }
 
 func (s *Server) terminalWS(w http.ResponseWriter, r *http.Request) {
-	if !s.authorized(r) {
+	account, ok := s.accountFromRequest(r)
+	if !ok {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -261,8 +337,13 @@ func (s *Server) terminalWS(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sessionID := fmt.Sprintf("sess-%d-%d", time.Now().UnixMilli(), s.counter.Add(1))
-	user := "browser"
-	workDir := config.NormalizePath(s.config.Snapshot().Edge.WorkDir)
+	user := normalizeTunnelAccount(account)
+	cfg := s.config.Snapshot()
+	policyCfg := s.policyForAccount(user, cfg.Policy)
+	workDir := config.NormalizePath(cfg.Edge.WorkDir)
+	if !pathWithinAllowed(workDir, policyCfg.AllowPaths) && len(policyCfg.AllowPaths) > 0 {
+		workDir = config.NormalizePath(policyCfg.AllowPaths[0])
+	}
 
 	send(serverMessage{Type: "ready", SessionID: sessionID, EdgeID: s.edgeID, Data: welcome(s.edgeName), WorkDir: workDir})
 
@@ -471,12 +552,19 @@ func (s *Server) terminalWS(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) tunnelAgentWS(w http.ResponseWriter, r *http.Request) {
-	token := requestToken(r)
-	if token == "" {
-		token = r.URL.Query().Get("token")
-	}
-	if !compareToken(token, s.config.TunnelToken()) {
+	username, sessionID, ok := r.BasicAuth()
+	accounts := s.accountStore()
+	if !ok || !accounts.VerifySession(sessionID, username) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	account, err := normalizeAccountUsername(username)
+	if err != nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if !accounts.TunnelAllowed(account) {
+		http.Error(w, "cloud tunnel is disabled for this account", http.StatusForbidden)
 		return
 	}
 
@@ -519,6 +607,7 @@ func (s *Server) tunnelAgentWS(w http.ResponseWriter, r *http.Request) {
 		hub:          s.tunnel,
 		conn:         conn,
 		logger:       s.logger,
+		account:      account,
 		edgeID:       hello.EdgeID,
 		edgeName:     hello.EdgeName,
 		workDir:      hello.WorkDir,
@@ -538,7 +627,17 @@ func (s *Server) tunnelAgentWS(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !s.authorized(r) {
+		if _, ok := s.accountFromRequest(r); !ok {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next(w, r)
+	}
+}
+
+func (s *Server) withAccount(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if _, ok := s.accountIdentityFromRequest(r); !ok {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
@@ -552,7 +651,7 @@ func (s *Server) withAdmin(next http.HandlerFunc) http.HandlerFunc {
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
-		if !s.adminAuthorized(r) {
+		if identity, ok := s.accountIdentityFromRequest(r); !ok || identity.Role != accountRoleAdmin {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
@@ -571,7 +670,7 @@ func (s *Server) withAdminStatic(next http.Handler) http.Handler {
 			return
 		}
 		if r.URL.Path == "/admin/" || r.URL.Path == "/admin/index.html" {
-			if !s.adminAuthorized(r) {
+			if identity, ok := s.accountIdentityFromRequest(r); !ok || identity.Role != accountRoleAdmin {
 				http.Redirect(w, r, "/admin/login.html", http.StatusFound)
 				return
 			}
@@ -580,28 +679,29 @@ func (s *Server) withAdminStatic(next http.Handler) http.Handler {
 	})
 }
 
+func (s *Server) withUserStatic(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/user/login.html", "/user/login.js", "/user/styles.css", "/user/app.js":
+			next.ServeHTTP(w, r)
+			return
+		}
+		if _, ok := s.accountIdentityFromRequest(r); !ok {
+			http.Redirect(w, r, "/user/login.html", http.StatusFound)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 func (s *Server) authorized(r *http.Request) bool {
-	return compareToken(requestToken(r), s.config.TerminalToken())
+	_, ok := s.accountFromRequest(r)
+	return ok
 }
 
 func (s *Server) adminAuthorized(r *http.Request) bool {
-	return compareToken(requestToken(r), s.config.AdminToken())
-}
-
-func requestToken(r *http.Request) string {
-	token := r.Header.Get("Authorization")
-	token = strings.TrimPrefix(token, "Bearer ")
-	if token == "" {
-		token = r.URL.Query().Get("token")
-	}
-	return token
-}
-
-func compareToken(got string, want string) bool {
-	if got == "" || want == "" {
-		return false
-	}
-	return subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
+	identity, ok := s.accountIdentityFromRequest(r)
+	return ok && identity.Role == accountRoleAdmin
 }
 
 func (s *Server) checkOrigin(r *http.Request) bool {
@@ -789,15 +889,199 @@ func (s *Server) adminConfig(w http.ResponseWriter, r *http.Request) {
 		}
 		current := s.config.Snapshot()
 		next := payload.Apply(current)
+		if payload.CloudTunnel.UseCurrentAccount {
+			identity, ok := s.accountIdentityFromRequest(r)
+			if !ok {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			tunnelSession, err := s.accountStore().IssueSession(identity.Username)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			next.CloudTunnel.Account = identity.Username
+			next.CloudTunnel.SessionID = tunnelSession.SessionID
+		}
 		if err := s.config.Update(next); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		if accounts := s.accountStore(); accounts != nil {
+			accounts.SetRegistrationEnabled(next.Server.RegistrationEnabled())
+		}
+		s.tunnel.setDefaultAccount(next.CloudTunnel.Account)
 		writeJSON(w, http.StatusOK, adminConfigFromConfig(next))
 	default:
 		w.Header().Set("Allow", "GET, PUT")
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+func (s *Server) adminAccounts(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, http.StatusOK, map[string]any{
+			"registration_enabled": s.accountStore().RegistrationEnabled(),
+			"accounts":             s.accountStore().List(),
+		})
+	case http.MethodPost:
+		var payload accountCreatePayload
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := s.accountStore().CreateAccount(payload.Username, payload.Password, payload.Role, s.config.Snapshot().Policy); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, http.StatusCreated, map[string]any{
+			"accounts": s.accountStore().List(),
+		})
+	default:
+		w.Header().Set("Allow", "GET, POST")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) userSettings(w http.ResponseWriter, r *http.Request) {
+	identity, ok := s.accountIdentityFromRequest(r)
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	cfg := s.config.Snapshot()
+	switch r.Method {
+	case http.MethodGet:
+		settings, err := s.accountStore().UserSettings(identity.Username, cfg.Policy)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, http.StatusOK, userSettingsToPayload(settings, accountPublicInfo{Username: identity.Username, Role: identity.Role}, cfg.Policy, cfg.CloudTunnel.GatewayURL))
+	case http.MethodPut:
+		var payload userSettingsUpdatePayload
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		settings, err := s.accountStore().SaveUserSettings(identity.Username, payload, cfg.Policy)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, http.StatusOK, userSettingsToPayload(settings, accountPublicInfo{Username: identity.Username, Role: identity.Role}, cfg.Policy, cfg.CloudTunnel.GatewayURL))
+	default:
+		w.Header().Set("Allow", "GET, PUT")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) userFS(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", "GET")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	identity, ok := s.accountIdentityFromRequest(r)
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	cfg := s.config.Snapshot()
+	roots := cleanPaths(cfg.Policy.AllowPaths)
+	path := config.NormalizePath(r.URL.Query().Get("path"))
+	if path == "" {
+		writeJSON(w, http.StatusOK, fsListResponse{
+			Path:    "",
+			Parent:  "",
+			Roots:   slices.Clone(roots),
+			Entries: rootEntries(roots),
+		})
+		return
+	}
+	if !pathWithinAllowed(path, roots) {
+		http.Error(w, "path is outside global allowed roots", http.StatusForbidden)
+		return
+	}
+	if s.runtimeIsTunnel() {
+		client := s.tunnelClientForAccount(identity.Username)
+		if client == nil {
+			http.Error(w, tunnelUnavailable().Error(), http.StatusServiceUnavailable)
+			return
+		}
+		var response workbenchFilesResponse
+		if err := client.request(r.Context(), "files", tunnelFilesRequest{Path: path}, &response); err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		response.AllowPaths = slices.Clone(roots)
+		if response.Parent != "" && !pathWithinAllowed(response.Parent, roots) {
+			response.Parent = ""
+		}
+		response.Entries = filterWorkbenchFileEntriesToPolicy(response.Entries, roots)
+		writeJSON(w, http.StatusOK, fsListResponse{
+			Path:    response.Path,
+			Parent:  response.Parent,
+			Roots:   slices.Clone(roots),
+			Entries: workbenchEntriesToFSEntries(response.Entries),
+		})
+		return
+	}
+
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	items := make([]fsEntry, 0, len(entries))
+	for _, entry := range entries {
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		entryPath := filepath.Join(path, entry.Name())
+		if !pathWithinAllowed(entryPath, roots) {
+			continue
+		}
+		items = append(items, fsEntry{
+			Name:  entry.Name(),
+			Path:  entryPath,
+			IsDir: entry.IsDir(),
+			Size:  info.Size(),
+		})
+	}
+	slices.SortFunc(items, func(a, b fsEntry) int {
+		if a.IsDir != b.IsDir {
+			if a.IsDir {
+				return -1
+			}
+			return 1
+		}
+		return strings.Compare(strings.ToLower(a.Name), strings.ToLower(b.Name))
+	})
+	parent := parentPath(path)
+	if parent != "" && !pathWithinAllowed(parent, roots) {
+		parent = ""
+	}
+	writeJSON(w, http.StatusOK, fsListResponse{
+		Path:    path,
+		Parent:  parent,
+		Roots:   slices.Clone(roots),
+		Entries: items,
+	})
+}
+
+func (s *Server) accountStore() *accountStore {
+	s.accountMu.RLock()
+	defer s.accountMu.RUnlock()
+	return s.accounts
+}
+
+func (s *Server) setAccountStore(accounts *accountStore) {
+	s.accountMu.Lock()
+	s.accounts = accounts
+	s.accountMu.Unlock()
 }
 
 func (s *Server) adminFS(w http.ResponseWriter, r *http.Request) {
@@ -877,7 +1161,7 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 }
 
 func welcome(edgeName string) string {
-	return "\r\nCloud Terminal connected to " + edgeName + "\r\nOnly whitelisted structured commands are executed. Shell operators are disabled.\r\n\r\n"
+	return "\r\nxmux connected to " + edgeName + "\r\nOnly whitelisted structured commands are executed. Shell operators are disabled.\r\n\r\n"
 }
 
 type clientMessage struct {
@@ -910,14 +1194,23 @@ type completionResponse struct {
 }
 
 type adminConfigPayload struct {
-	AuthToken        string                         `json:"auth_token"`
-	AdminToken       string                         `json:"admin_token"`
-	TunnelToken      string                         `json:"tunnel_token"`
-	AllowHosts       []string                       `json:"allow_hosts"`
-	AdminIPAllowlist []string                       `json:"admin_ip_allowlist"`
-	Deny             []string                       `json:"deny"`
-	AllowPaths       []string                       `json:"allow_paths"`
-	Commands         map[string]adminCommandPayload `json:"commands"`
+	DatabasePath               string                         `json:"database_path"`
+	AccountStorePath           string                         `json:"account_store_path"`
+	AccountRegistrationEnabled bool                           `json:"account_registration_enabled"`
+	CloudTunnel                adminCloudTunnelPayload        `json:"cloud_tunnel"`
+	AllowHosts                 []string                       `json:"allow_hosts"`
+	AdminIPAllowlist           []string                       `json:"admin_ip_allowlist"`
+	Deny                       []string                       `json:"deny"`
+	AllowPaths                 []string                       `json:"allow_paths"`
+	Commands                   map[string]adminCommandPayload `json:"commands"`
+}
+
+type adminCloudTunnelPayload struct {
+	Enabled           bool   `json:"enabled"`
+	GatewayURL        string `json:"gateway_url"`
+	Account           string `json:"account"`
+	Bound             bool   `json:"bound"`
+	UseCurrentAccount bool   `json:"use_current_account,omitempty"`
 }
 
 type adminCommandPayload struct {
@@ -942,9 +1235,15 @@ func adminConfigFromConfig(cfg config.Config) adminConfigPayload {
 		}
 	}
 	return adminConfigPayload{
-		AuthToken:        cfg.Server.AuthToken,
-		AdminToken:       cfg.Server.AdminToken,
-		TunnelToken:      cfg.Server.TunnelToken,
+		DatabasePath:               cfg.Server.DatabasePath,
+		AccountStorePath:           cfg.Server.AccountStorePath,
+		AccountRegistrationEnabled: cfg.Server.RegistrationEnabled(),
+		CloudTunnel: adminCloudTunnelPayload{
+			Enabled:    cfg.CloudTunnel.Enabled,
+			GatewayURL: cfg.CloudTunnel.GatewayURL,
+			Account:    cfg.CloudTunnel.Account,
+			Bound:      strings.TrimSpace(cfg.CloudTunnel.Account) != "" && strings.TrimSpace(cfg.CloudTunnel.SessionID) != "",
+		},
 		AllowHosts:       slices.Clone(cfg.Server.AllowHosts),
 		AdminIPAllowlist: slices.Clone(cfg.Server.AdminIPAllowlist),
 		Deny:             slices.Clone(cfg.Policy.Deny),
@@ -954,9 +1253,13 @@ func adminConfigFromConfig(cfg config.Config) adminConfigPayload {
 }
 
 func (p adminConfigPayload) Apply(cfg config.Config) config.Config {
-	cfg.Server.AuthToken = strings.TrimSpace(p.AuthToken)
-	cfg.Server.AdminToken = strings.TrimSpace(p.AdminToken)
-	cfg.Server.TunnelToken = strings.TrimSpace(p.TunnelToken)
+	if strings.TrimSpace(p.DatabasePath) != "" {
+		cfg.Server.DatabasePath = strings.TrimSpace(p.DatabasePath)
+	}
+	registrationEnabled := p.AccountRegistrationEnabled
+	cfg.Server.AccountRegistrationEnabled = &registrationEnabled
+	cfg.CloudTunnel.Enabled = p.CloudTunnel.Enabled
+	cfg.CloudTunnel.GatewayURL = strings.TrimSpace(p.CloudTunnel.GatewayURL)
 	cfg.Server.AllowHosts = cleanList(p.AllowHosts)
 	cfg.Server.AdminIPAllowlist = cleanList(p.AdminIPAllowlist)
 	cfg.Policy.Deny = cleanList(p.Deny)
@@ -1018,6 +1321,39 @@ type fsEntry struct {
 	Path  string `json:"path"`
 	IsDir bool   `json:"is_dir"`
 	Size  int64  `json:"size"`
+}
+
+func rootEntries(roots []string) []fsEntry {
+	items := make([]fsEntry, 0, len(roots))
+	for _, root := range roots {
+		root = config.NormalizePath(root)
+		if root == "" {
+			continue
+		}
+		name := filepath.Base(root)
+		if name == "." || name == string(filepath.Separator) {
+			name = root
+		}
+		items = append(items, fsEntry{
+			Name:  name,
+			Path:  root,
+			IsDir: true,
+		})
+	}
+	return items
+}
+
+func workbenchEntriesToFSEntries(entries []workbenchFileEntry) []fsEntry {
+	out := make([]fsEntry, 0, len(entries))
+	for _, entry := range entries {
+		out = append(out, fsEntry{
+			Name:  entry.Name,
+			Path:  entry.Path,
+			IsDir: entry.IsDir,
+			Size:  entry.Size,
+		})
+	}
+	return out
 }
 
 func parentPath(path string) string {

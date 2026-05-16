@@ -17,14 +17,16 @@ func TestWorkbenchAuthorizedUsesCookie(t *testing.T) {
 	t.Parallel()
 
 	server := testServer(t, config.Config{
-		Server: config.ServerConfig{AuthToken: "mobile-token", AdminToken: "admin"},
 		Policy: minimalPolicy(),
 	})
+	cookies := registerTestAccount(t, server, "mobile@example.com", "secret123")
 	request := &http.Request{Header: http.Header{}, URL: &url.URL{}}
-	request.AddCookie(&http.Cookie{Name: workbenchCookieName, Value: "mobile-token"})
+	for _, cookie := range cookies {
+		request.AddCookie(cookie)
+	}
 
 	if !server.workbenchAuthorized(request) {
-		t.Fatal("expected workbench cookie token to authorize")
+		t.Fatal("expected account session cookie to authorize")
 	}
 }
 
@@ -32,7 +34,6 @@ func TestWorkbenchPreviewPortAllowlist(t *testing.T) {
 	t.Parallel()
 
 	server := testServer(t, config.Config{
-		Server: config.ServerConfig{AuthToken: "token", AdminToken: "admin"},
 		Edge:   config.EdgeConfig{PreviewPorts: []int{3000, 5173}},
 		Policy: minimalPolicy(),
 	})
@@ -129,12 +130,11 @@ func TestWorkbenchStateIncludesPreviewPorts(t *testing.T) {
 	t.Parallel()
 
 	server := testServer(t, config.Config{
-		Server: config.ServerConfig{AuthToken: "token", AdminToken: "admin"},
 		Edge:   config.EdgeConfig{PreviewPorts: []int{3000, 8080}},
 		Policy: policy.Config{AllowPaths: []string{"/tmp"}, Commands: map[string]policy.CommandPolicy{"pwd": {Enabled: true}}},
 	})
 
-	state := server.workbenchStatePayload()
+	state := server.workbenchStatePayload("")
 	if len(state.PreviewPorts) != 2 || state.PreviewPorts[0] != 3000 || state.PreviewPorts[1] != 8080 {
 		t.Fatalf("PreviewPorts = %v", state.PreviewPorts)
 	}
@@ -144,7 +144,6 @@ func TestWorkbenchStateIncludesAgents(t *testing.T) {
 	t.Parallel()
 
 	server := testServer(t, config.Config{
-		Server: config.ServerConfig{AuthToken: "token", AdminToken: "admin"},
 		Policy: policy.Config{
 			Deny: []string{"gemini"},
 			Commands: map[string]policy.CommandPolicy{
@@ -155,7 +154,7 @@ func TestWorkbenchStateIncludesAgents(t *testing.T) {
 		},
 	})
 
-	state := server.workbenchStatePayload()
+	state := server.workbenchStatePayload("")
 	if len(state.Agents) != 3 {
 		t.Fatalf("Agents length = %d, want 3", len(state.Agents))
 	}
@@ -167,6 +166,166 @@ func TestWorkbenchStateIncludesAgents(t *testing.T) {
 	}
 	if state.Agents[2].ID != "gemini" || state.Agents[2].Enabled {
 		t.Fatalf("gemini agent = %+v, want disabled gemini", state.Agents[2])
+	}
+}
+
+func TestTunnelWorkbenchStateIsFilteredByUserPolicy(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	allowed := filepath.Join(root, "allowed")
+	denied := filepath.Join(root, "denied")
+	if err := os.MkdirAll(allowed, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(denied, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	server := NewServer(Options{
+		Config: config.NewStore(filepath.Join(t.TempDir(), "policy.yaml"), &config.Config{
+			Server: config.ServerConfig{
+				DatabasePath:               filepath.Join(t.TempDir(), "xmux.db"),
+				AccountRegistrationEnabled: testBoolPtr(true),
+			},
+			Policy: policy.Config{
+				AllowPaths: []string{root},
+				Commands: map[string]policy.CommandPolicy{
+					"codex":  {Enabled: true, Interactive: true},
+					"claude": {Enabled: true, Interactive: true},
+				},
+			},
+		}),
+	})
+	registerTestAccount(t, server, "user@example.com", "secret123")
+	if _, err := server.accountStore().SaveUserSettings("user@example.com", userSettingsUpdatePayload{
+		CloudTunnelEnabled: true,
+		AllowPaths:         []string{allowed},
+		Commands: map[string]adminCommandPayload{
+			"codex":  {Enabled: true, Interactive: true},
+			"claude": {Enabled: false, Interactive: true},
+		},
+	}, server.config.Snapshot().Policy); err != nil {
+		t.Fatalf("save user settings: %v", err)
+	}
+	server.tunnel.set(&tunnelClient{
+		hub:          server.tunnel,
+		account:      "user@example.com",
+		edgeID:       "edge-user",
+		edgeName:     "User Edge",
+		workDir:      denied,
+		allowPaths:   []string{allowed, denied},
+		previewPorts: []int{3000},
+		agents: []workbenchAgentInfo{
+			{ID: "codex", Label: "Codex", Command: "codex", Enabled: true},
+			{ID: "claude", Label: "Claude Code", Command: "claude", Enabled: true},
+		},
+		pending:     make(map[string]chan tunnelEnvelope),
+		exitWaiters: make(map[string]chan workbenchServerMessage),
+	})
+
+	state := server.workbenchStatePayload("user@example.com")
+	if state.WorkDir != allowed {
+		t.Fatalf("WorkDir = %q, want %q", state.WorkDir, allowed)
+	}
+	if len(state.AllowPaths) != 1 || state.AllowPaths[0] != allowed {
+		t.Fatalf("AllowPaths = %v, want %s", state.AllowPaths, allowed)
+	}
+	for _, agent := range state.Agents {
+		if agent.ID == "claude" && agent.Enabled {
+			t.Fatalf("claude should be disabled by user policy: %+v", state.Agents)
+		}
+	}
+}
+
+func TestTunnelResolveStartUsesUserPolicy(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	allowed := filepath.Join(root, "allowed")
+	denied := filepath.Join(root, "denied")
+	if err := os.MkdirAll(allowed, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(denied, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	server := NewServer(Options{
+		Config: config.NewStore(filepath.Join(t.TempDir(), "policy.yaml"), &config.Config{
+			Server: config.ServerConfig{
+				DatabasePath:               filepath.Join(t.TempDir(), "xmux.db"),
+				AccountRegistrationEnabled: testBoolPtr(true),
+			},
+			Policy: policy.Config{
+				AllowPaths: []string{root},
+				Commands: map[string]policy.CommandPolicy{
+					"codex":  {Enabled: true, Bin: "/usr/local/bin/codex", Interactive: true},
+					"claude": {Enabled: true, Interactive: true},
+				},
+			},
+		}),
+	})
+	registerTestAccount(t, server, "user@example.com", "secret123")
+	if _, err := server.accountStore().SaveUserSettings("user@example.com", userSettingsUpdatePayload{
+		CloudTunnelEnabled: true,
+		AllowPaths:         []string{allowed},
+		Commands: map[string]adminCommandPayload{
+			"codex":  {Enabled: true, Bin: "/usr/local/bin/codex", Interactive: true},
+			"claude": {Enabled: false, Interactive: true},
+		},
+	}, server.config.Snapshot().Policy); err != nil {
+		t.Fatalf("save user settings: %v", err)
+	}
+	server.tunnel.set(&tunnelClient{
+		hub:        server.tunnel,
+		account:    "user@example.com",
+		edgeID:     "edge-user",
+		edgeName:   "User Edge",
+		workDir:    allowed,
+		allowPaths: []string{allowed, denied},
+		agents: []workbenchAgentInfo{
+			{ID: "codex", Label: "Codex", Command: "codex", Enabled: true},
+			{ID: "claude", Label: "Claude Code", Command: "claude", Enabled: true},
+		},
+		pending:     make(map[string]chan tunnelEnvelope),
+		exitWaiters: make(map[string]chan workbenchServerMessage),
+	})
+	runtime := server.runtime.(*tunnelRuntime)
+
+	resolved, err := runtime.ResolveWorkbenchStart(workbenchStartOptions{
+		Account: "user@example.com",
+		Agent:   "codex",
+		WorkDir: allowed,
+	})
+	if err != nil {
+		t.Fatalf("ResolveWorkbenchStart codex: %v", err)
+	}
+	if resolved.Agent.Command != "codex" {
+		t.Fatalf("resolved command = %q, want agent id", resolved.Agent.Command)
+	}
+	decision, err := server.config.UserPolicyEngine("user@example.com", server.accountStore())
+	if err != nil {
+		t.Fatalf("user policy engine: %v", err)
+	}
+	interactive, err := decision.Decide("codex", []string{"/usr/local/bin/codex"})
+	if err != nil {
+		t.Fatalf("Decide codex override: %v", err)
+	}
+	if interactive.Bin != "/usr/local/bin/codex" {
+		t.Fatalf("interactive bin = %q, want user policy bin", interactive.Bin)
+	}
+	if _, err := runtime.ResolveWorkbenchStart(workbenchStartOptions{
+		Account: "user@example.com",
+		Agent:   "claude",
+		WorkDir: allowed,
+	}); err == nil {
+		t.Fatal("expected user-disabled claude to be rejected")
+	}
+	if _, err := runtime.ResolveWorkbenchStart(workbenchStartOptions{
+		Account: "user@example.com",
+		Agent:   "codex",
+		WorkDir: denied,
+	}); err == nil {
+		t.Fatal("expected denied path to be rejected")
 	}
 }
 

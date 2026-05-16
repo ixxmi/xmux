@@ -23,6 +23,7 @@ import (
 
 	"cloud-terminal/internal/config"
 	"cloud-terminal/internal/edge"
+	"cloud-terminal/internal/policy"
 
 	"github.com/gorilla/websocket"
 )
@@ -36,8 +37,11 @@ const (
 )
 
 type workbenchManager struct {
-	runtime   Runtime
-	config    *config.Store
+	runtime        Runtime
+	config         *config.Store
+	policyResolver interface {
+		UserPolicy(string, policy.Config) (policy.Config, error)
+	}
 	edgeID    string
 	edgeName  string
 	logger    *slog.Logger
@@ -50,6 +54,7 @@ type workbenchManager struct {
 
 type workbenchStartOptions struct {
 	SessionID string
+	Account   string
 	Agent     string
 	WorkDir   string
 	Target    string
@@ -73,6 +78,7 @@ type workbenchStartResolver interface {
 type workbenchSession struct {
 	id        string
 	requestID string
+	account   string
 	edgeID    string
 	edgeName  string
 	agent     string
@@ -98,6 +104,7 @@ type workbenchSession struct {
 type workbenchSnapshot struct {
 	ID         string
 	RequestID  string
+	Account    string
 	EdgeID     string
 	EdgeName   string
 	Agent      string
@@ -136,7 +143,24 @@ type workbenchServerMessage struct {
 }
 
 type workbenchAuthPayload struct {
-	Token string `json:"token"`
+	Username string `json:"username"`
+	Password string `json:"password"`
+}
+
+type accountAuthPayload struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
+}
+
+type accountCreatePayload struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
+	Role     string `json:"role"`
+}
+
+type accountIdentity struct {
+	Username string
+	Role     string
 }
 
 type workbenchStatePayload struct {
@@ -153,6 +177,7 @@ type workbenchStatePayload struct {
 
 type workbenchSessionInfo struct {
 	ID         string `json:"id"`
+	Account    string `json:"account,omitempty"`
 	Agent      string `json:"agent"`
 	AgentLabel string `json:"agent_label"`
 	WorkDir    string `json:"work_dir"`
@@ -175,6 +200,7 @@ type workbenchPersistedState struct {
 type workbenchPersistedSession struct {
 	ID         string    `json:"id"`
 	RequestID  string    `json:"request_id,omitempty"`
+	Account    string    `json:"account,omitempty"`
 	EdgeID     string    `json:"edge_id"`
 	EdgeName   string    `json:"edge_name"`
 	Agent      string    `json:"agent"`
@@ -276,6 +302,9 @@ func (m *workbenchManager) getOrCreate(opts workbenchStartOptions) (*workbenchSe
 	if sessionID != "" {
 		if session := m.sessions[sessionID]; session != nil {
 			m.mu.RUnlock()
+			if normalizeTunnelAccount(session.account) != normalizeTunnelAccount(opts.Account) {
+				return nil, false, errors.New("session does not belong to this account")
+			}
 			_ = session.Resize(opts.Rows, opts.Cols)
 			session.touch()
 			return session, false, nil
@@ -295,6 +324,7 @@ func (m *workbenchManager) getOrCreate(opts workbenchStartOptions) (*workbenchSe
 	session := &workbenchSession{
 		id:          sessionID,
 		requestID:   requestID,
+		account:     normalizeTunnelAccount(opts.Account),
 		edgeID:      resolved.EdgeID,
 		edgeName:    resolved.EdgeName,
 		agent:       resolved.Agent.ID,
@@ -308,7 +338,7 @@ func (m *workbenchManager) getOrCreate(opts workbenchStartOptions) (*workbenchSe
 	interactive, err := m.runtime.StartInteractive(context.Background(), edge.ExecRequest{
 		RequestID: requestID,
 		SessionID: sessionID,
-		User:      "mobile",
+		User:      firstNonEmpty(normalizeTunnelAccount(opts.Account), "mobile"),
 		EdgeID:    resolved.EdgeID,
 		WorkDir:   resolved.WorkDir,
 		Command:   resolved.Agent.Command,
@@ -353,11 +383,17 @@ func (m *workbenchManager) resolveStart(opts workbenchStartOptions) (workbenchSt
 	}
 
 	cfg := m.config.Snapshot()
-	workDir, targetArgs, err := resolveWorkbenchTarget(cfg, opts.WorkDir, opts.Target)
+	policyCfg := cfg.Policy
+	if m.policyResolver != nil {
+		if resolved, err := m.policyResolver.UserPolicy(opts.Account, cfg.Policy); err == nil {
+			policyCfg = resolved
+		}
+	}
+	workDir, targetArgs, err := resolveWorkbenchTargetWithPolicy(cfg, policyCfg, opts.WorkDir, opts.Target)
 	if err != nil {
 		return workbenchStartResolution{}, err
 	}
-	agent, err := resolveWorkbenchAgent(cfg, opts.Agent)
+	agent, err := resolveWorkbenchAgentWithPolicy(policyCfg, opts.Agent)
 	if err != nil {
 		return workbenchStartResolution{}, err
 	}
@@ -377,14 +413,18 @@ type workbenchAgent struct {
 }
 
 func resolveWorkbenchAgent(cfg config.Config, requested string) (workbenchAgent, error) {
+	return resolveWorkbenchAgentWithPolicy(cfg.Policy, requested)
+}
+
+func resolveWorkbenchAgentWithPolicy(policyCfg policy.Config, requested string) (workbenchAgent, error) {
 	agentID := normalizeWorkbenchAgentID(requested)
 	switch agentID {
 	case "codex":
-		return configuredWorkbenchAgent(cfg, "codex", "Codex")
+		return configuredWorkbenchAgent(policyCfg, "codex", "Codex")
 	case "claude", "claude-code", "claude_code":
-		return configuredWorkbenchAgent(cfg, "claude", "Claude Code")
+		return configuredWorkbenchAgent(policyCfg, "claude", "Claude Code")
 	case "gemini":
-		return configuredWorkbenchAgent(cfg, "gemini", "Gemini")
+		return configuredWorkbenchAgent(policyCfg, "gemini", "Gemini")
 	default:
 		return workbenchAgent{}, fmt.Errorf("unsupported agent %q", requested)
 	}
@@ -402,8 +442,8 @@ func normalizeWorkbenchAgentID(requested string) string {
 	return agentID
 }
 
-func configuredWorkbenchAgent(cfg config.Config, id string, label string) (workbenchAgent, error) {
-	rule, ok := cfg.Policy.Commands[id]
+func configuredWorkbenchAgent(policyCfg policy.Config, id string, label string) (workbenchAgent, error) {
+	rule, ok := policyCfg.Commands[id]
 	if !ok || !rule.Enabled {
 		return workbenchAgent{}, fmt.Errorf("%s is not enabled in command policy", label)
 	}
@@ -414,20 +454,24 @@ func configuredWorkbenchAgent(cfg config.Config, id string, label string) (workb
 }
 
 func listWorkbenchAgents(cfg config.Config) []workbenchAgentInfo {
+	return listWorkbenchAgentsForPolicy(cfg.Policy)
+}
+
+func listWorkbenchAgentsForPolicy(policyCfg policy.Config) []workbenchAgentInfo {
 	definitions := []workbenchAgentInfo{
 		{ID: "codex", Label: "Codex", Command: "codex"},
 		{ID: "claude", Label: "Claude Code", Command: "claude"},
 		{ID: "gemini", Label: "Gemini", Command: "gemini"},
 	}
-	denied := make(map[string]struct{}, len(cfg.Policy.Deny))
-	for _, command := range cfg.Policy.Deny {
+	denied := make(map[string]struct{}, len(policyCfg.Deny))
+	for _, command := range policyCfg.Deny {
 		command = strings.TrimSpace(command)
 		if command != "" {
 			denied[command] = struct{}{}
 		}
 	}
 	for index := range definitions {
-		rule, ok := cfg.Policy.Commands[definitions[index].ID]
+		rule, ok := policyCfg.Commands[definitions[index].ID]
 		if ok && strings.TrimSpace(rule.Bin) != "" {
 			definitions[index].Command = strings.TrimSpace(rule.Bin)
 		}
@@ -462,13 +506,17 @@ func firstNonEmpty(values ...string) string {
 }
 
 func resolveWorkbenchTarget(cfg config.Config, requestedWorkDir string, requestedTarget string) (string, []string, error) {
+	return resolveWorkbenchTargetWithPolicy(cfg, cfg.Policy, requestedWorkDir, requestedTarget)
+}
+
+func resolveWorkbenchTargetWithPolicy(cfg config.Config, policyCfg policy.Config, requestedWorkDir string, requestedTarget string) (string, []string, error) {
 	workDir := config.NormalizePath(requestedWorkDir)
 	if workDir == "" {
 		workDir = config.NormalizePath(cfg.Edge.WorkDir)
 	}
 	target := config.NormalizePath(requestedTarget)
 	if target != "" {
-		if !pathWithinAllowed(target, cfg.Policy.AllowPaths) {
+		if !pathWithinAllowed(target, policyCfg.AllowPaths) {
 			return "", nil, errors.New("target is outside allowed roots")
 		}
 		info, err := os.Stat(target)
@@ -482,7 +530,7 @@ func resolveWorkbenchTarget(cfg config.Config, requestedWorkDir string, requeste
 		workDir = filepath.Dir(target)
 		return workDir, []string{filepath.Base(target)}, nil
 	}
-	if !pathWithinAllowed(workDir, cfg.Policy.AllowPaths) {
+	if !pathWithinAllowed(workDir, policyCfg.AllowPaths) {
 		return "", nil, errors.New("work_dir is outside allowed roots")
 	}
 	info, err := os.Stat(workDir)
@@ -495,7 +543,8 @@ func resolveWorkbenchTarget(cfg config.Config, requestedWorkDir string, requeste
 	return workDir, nil, nil
 }
 
-func (m *workbenchManager) list() []workbenchSessionInfo {
+func (m *workbenchManager) list(account string) []workbenchSessionInfo {
+	account = normalizeTunnelAccount(account)
 	m.mu.RLock()
 	sessions := make([]*workbenchSession, 0, len(m.sessions))
 	for _, session := range m.sessions {
@@ -506,8 +555,12 @@ func (m *workbenchManager) list() []workbenchSessionInfo {
 	items := make([]workbenchSessionInfo, 0, len(sessions))
 	for _, session := range sessions {
 		snap := session.snapshot()
+		if account != "" && normalizeTunnelAccount(snap.Account) != account {
+			continue
+		}
 		items = append(items, workbenchSessionInfo{
 			ID:         snap.ID,
+			Account:    snap.Account,
 			Agent:      snap.Agent,
 			AgentLabel: workbenchAgentLabel(snap.Agent),
 			WorkDir:    snap.WorkDir,
@@ -587,6 +640,7 @@ func (m *workbenchManager) loadState() error {
 		session := &workbenchSession{
 			id:          item.ID,
 			requestID:   item.RequestID,
+			account:     normalizeTunnelAccount(item.Account),
 			edgeID:      firstNonEmpty(item.EdgeID, m.edgeID),
 			edgeName:    firstNonEmpty(item.EdgeName, m.edgeName),
 			agent:       firstNonEmpty(item.Agent, "codex"),
@@ -671,6 +725,7 @@ func (m *workbenchManager) persistedSessions() []workbenchPersistedSession {
 		items = append(items, workbenchPersistedSession{
 			ID:         snap.ID,
 			RequestID:  snap.RequestID,
+			Account:    snap.Account,
 			EdgeID:     snap.EdgeID,
 			EdgeName:   snap.EdgeName,
 			Agent:      snap.Agent,
@@ -721,6 +776,7 @@ func (s *workbenchSession) snapshotLocked() workbenchSnapshot {
 	return workbenchSnapshot{
 		ID:         s.id,
 		RequestID:  s.requestID,
+		Account:    s.account,
 		EdgeID:     s.edgeID,
 		EdgeName:   s.edgeName,
 		Agent:      s.agent,
@@ -853,21 +909,144 @@ func (s *Server) workbenchAuth(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if !compareToken(strings.TrimSpace(payload.Token), s.config.TerminalToken()) {
+
+	session, err := s.accountStore().Login(payload.Username, payload.Password)
+	if err != nil {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
+	s.setWorkbenchCookie(w, r, session.SessionID)
+	s.setAccountCookie(w, r, session.SessionID)
+	writeJSON(w, http.StatusOK, s.workbenchStatePayload(session.Username))
+}
 
+func (s *Server) accountRegister(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", "POST")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var payload accountAuthPayload
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	session, err := s.accountStore().Register(payload.Username, payload.Password, s.config.Snapshot().Policy)
+	if err != nil {
+		status := http.StatusBadRequest
+		if strings.Contains(err.Error(), "disabled") {
+			status = http.StatusForbidden
+		}
+		http.Error(w, err.Error(), status)
+		return
+	}
+	s.setWorkbenchCookie(w, r, session.SessionID)
+	s.setAccountCookie(w, r, session.SessionID)
+	writeJSON(w, http.StatusOK, s.accountAuthResponse(session.Username))
+}
+
+func (s *Server) accountLogin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", "POST")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var payload accountAuthPayload
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	session, err := s.accountStore().Login(payload.Username, payload.Password)
+	if err != nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	s.setWorkbenchCookie(w, r, session.SessionID)
+	s.setAccountCookie(w, r, session.SessionID)
+	writeJSON(w, http.StatusOK, s.accountAuthResponse(session.Username))
+}
+
+func (s *Server) accountLogout(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", "POST")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if sessionID := accountRequestSessionID(r); sessionID != "" {
+		s.accountStore().RevokeSession(sessionID)
+	}
+	s.clearWorkbenchCookie(w, r)
+	s.clearAccountCookie(w, r)
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (s *Server) accountMe(w http.ResponseWriter, r *http.Request) {
+	identity, ok := s.accountIdentityFromRequest(r)
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, http.StatusOK, s.accountAuthResponse(identity.Username))
+	case http.MethodPut:
+		var payload accountProfileUpdatePayload
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := s.accountStore().UpdatePassword(identity.Username, payload.CurrentPassword, payload.NewPassword); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, http.StatusOK, s.accountAuthResponse(identity.Username))
+	default:
+		w.Header().Set("Allow", "GET, PUT")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) accountAuthResponse(account string) map[string]any {
+	return map[string]any{
+		"username":             account,
+		"role":                 s.accountRole(account),
+		"registration_enabled": s.accountStore().RegistrationEnabled(),
+		"state":                s.workbenchStatePayload(account),
+	}
+}
+
+func (s *Server) accountRole(account string) string {
+	account = normalizeTunnelAccount(account)
+	for _, item := range s.accountStore().List() {
+		if item.Username == account {
+			return item.Role
+		}
+	}
+	return accountRoleUser
+}
+
+func (s *Server) setWorkbenchCookie(w http.ResponseWriter, r *http.Request, value string) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     workbenchCookieName,
-		Value:    strings.TrimSpace(payload.Token),
+		Value:    strings.TrimSpace(value),
 		Path:     "/",
 		MaxAge:   30 * 24 * 60 * 60,
 		HttpOnly: true,
 		SameSite: http.SameSiteStrictMode,
 		Secure:   secureRequest(r),
 	})
-	writeJSON(w, http.StatusOK, s.workbenchStatePayload())
+}
+
+func (s *Server) setAccountCookie(w http.ResponseWriter, r *http.Request, value string) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     accountCookieName,
+		Value:    strings.TrimSpace(value),
+		Path:     "/",
+		MaxAge:   30 * 24 * 60 * 60,
+		HttpOnly: true,
+		SameSite: http.SameSiteStrictMode,
+		Secure:   secureRequest(r),
+	})
 }
 
 func (s *Server) workbenchLogout(w http.ResponseWriter, r *http.Request) {
@@ -876,6 +1055,15 @@ func (s *Server) workbenchLogout(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	if sessionID := accountRequestSessionID(r); sessionID != "" {
+		s.accountStore().RevokeSession(sessionID)
+	}
+	s.clearWorkbenchCookie(w, r)
+	s.clearAccountCookie(w, r)
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (s *Server) clearWorkbenchCookie(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     workbenchCookieName,
 		Value:    "",
@@ -885,7 +1073,18 @@ func (s *Server) workbenchLogout(w http.ResponseWriter, r *http.Request) {
 		SameSite: http.SameSiteStrictMode,
 		Secure:   secureRequest(r),
 	})
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (s *Server) clearAccountCookie(w http.ResponseWriter, r *http.Request) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     accountCookieName,
+		Value:    "",
+		Path:     "/",
+		MaxAge:   -1,
+		HttpOnly: true,
+		SameSite: http.SameSiteStrictMode,
+		Secure:   secureRequest(r),
+	})
 }
 
 func (s *Server) withWorkbench(next http.HandlerFunc) http.HandlerFunc {
@@ -898,14 +1097,52 @@ func (s *Server) withWorkbench(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+type requestIdentity struct {
+	Account string
+}
+
 func (s *Server) workbenchAuthorized(r *http.Request) bool {
-	token := requestToken(r)
-	if token == "" {
-		if cookie, err := r.Cookie(workbenchCookieName); err == nil {
-			token = cookie.Value
-		}
+	_, ok := s.workbenchIdentity(r)
+	return ok
+}
+
+func (s *Server) workbenchIdentity(r *http.Request) (requestIdentity, bool) {
+	sessionID := workbenchRequestSessionID(r)
+	if account, ok := s.accountStore().ValidateSession(sessionID); ok {
+		return requestIdentity{Account: account}, true
 	}
-	return compareToken(token, s.config.TerminalToken())
+	return requestIdentity{}, false
+}
+
+func (s *Server) accountFromRequest(r *http.Request) (string, bool) {
+	identity, ok := s.accountIdentityFromRequest(r)
+	return identity.Username, ok
+}
+
+func (s *Server) accountIdentityFromRequest(r *http.Request) (accountIdentity, bool) {
+	sessionID := accountRequestSessionID(r)
+	account, ok := s.accountStore().ValidateSessionInfo(sessionID)
+	if !ok {
+		return accountIdentity{}, false
+	}
+	return accountIdentity{Username: account.Username, Role: account.Role}, true
+}
+
+func workbenchRequestSessionID(r *http.Request) string {
+	if cookie, err := r.Cookie(workbenchCookieName); err == nil {
+		return cookie.Value
+	}
+	return ""
+}
+
+func accountRequestSessionID(r *http.Request) string {
+	if cookie, err := r.Cookie(accountCookieName); err == nil {
+		return cookie.Value
+	}
+	if cookie, err := r.Cookie(workbenchCookieName); err == nil {
+		return cookie.Value
+	}
+	return ""
 }
 
 func (s *Server) workbenchState(w http.ResponseWriter, r *http.Request) {
@@ -914,13 +1151,16 @@ func (s *Server) workbenchState(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	writeJSON(w, http.StatusOK, s.workbenchStatePayload())
+	identity, _ := s.workbenchIdentity(r)
+	writeJSON(w, http.StatusOK, s.workbenchStatePayload(identity.Account))
 }
 
-func (s *Server) workbenchStatePayload() workbenchStatePayload {
+func (s *Server) workbenchStatePayload(account string) workbenchStatePayload {
+	account = normalizeTunnelAccount(account)
 	cfg := s.config.Snapshot()
+	policyCfg := s.policyForAccount(account, cfg.Policy)
 	if s.runtimeIsTunnel() {
-		client := s.tunnel.current()
+		client := s.tunnelClientForAccount(account)
 		if client == nil {
 			return workbenchStatePayload{
 				EdgeID:       s.edgeID,
@@ -931,20 +1171,22 @@ func (s *Server) workbenchStatePayload() workbenchStatePayload {
 				AllowPaths:   nil,
 				PreviewPorts: nil,
 				Agents:       disabledWorkbenchAgents(),
-				Sessions:     s.workbench.list(),
+				Sessions:     s.workbench.list(account),
 			}
 		}
 		info := client.info()
+		allowPaths := filterAllowedPaths(info.allowPaths, policyCfg.AllowPaths)
+		workDir := firstAllowedPath(info.workDir, allowPaths)
 		return workbenchStatePayload{
 			EdgeID:       info.edgeID,
 			EdgeName:     info.edgeName,
 			EdgeOnline:   true,
 			Tunnel:       true,
-			WorkDir:      info.workDir,
-			AllowPaths:   info.allowPaths,
+			WorkDir:      workDir,
+			AllowPaths:   allowPaths,
 			PreviewPorts: info.previewPorts,
-			Agents:       info.agents,
-			Sessions:     mergeWorkbenchSessions(s.workbench.list(), info.sessions),
+			Agents:       filterWorkbenchAgentsForPolicy(info.agents, policyCfg),
+			Sessions:     mergeWorkbenchSessions(s.workbench.list(account), info.sessions, account),
 		}
 	}
 	return workbenchStatePayload{
@@ -953,11 +1195,22 @@ func (s *Server) workbenchStatePayload() workbenchStatePayload {
 		EdgeOnline:   true,
 		Tunnel:       false,
 		WorkDir:      config.NormalizePath(cfg.Edge.WorkDir),
-		AllowPaths:   slices.Clone(cfg.Policy.AllowPaths),
+		AllowPaths:   slices.Clone(policyCfg.AllowPaths),
 		PreviewPorts: slices.Clone(cfg.Edge.PreviewPorts),
-		Agents:       listWorkbenchAgents(cfg),
-		Sessions:     s.workbench.list(),
+		Agents:       listWorkbenchAgentsForPolicy(policyCfg),
+		Sessions:     s.workbench.list(account),
 	}
+}
+
+func (s *Server) policyForAccount(account string, global policy.Config) policy.Config {
+	if s.accountStore() == nil {
+		return global
+	}
+	resolved, err := s.accountStore().UserPolicy(account, global)
+	if err != nil {
+		return global
+	}
+	return resolved
 }
 
 func disabledWorkbenchAgents() []workbenchAgentInfo {
@@ -968,10 +1221,48 @@ func disabledWorkbenchAgents() []workbenchAgentInfo {
 	}
 }
 
-func mergeWorkbenchSessions(primary []workbenchSessionInfo, secondary []workbenchSessionInfo) []workbenchSessionInfo {
+func filterWorkbenchAgentsForPolicy(agents []workbenchAgentInfo, policyCfg policy.Config) []workbenchAgentInfo {
+	allowed := listWorkbenchAgentsForPolicy(policyCfg)
+	allowedByID := make(map[string]workbenchAgentInfo, len(allowed))
+	for _, agent := range allowed {
+		allowedByID[normalizeWorkbenchAgentID(agent.ID)] = agent
+	}
+	filtered := make([]workbenchAgentInfo, 0, len(agents))
+	seen := make(map[string]struct{}, len(agents))
+	for _, agent := range agents {
+		id := normalizeWorkbenchAgentID(agent.ID)
+		limit, ok := allowedByID[id]
+		if !ok {
+			continue
+		}
+		agent.ID = id
+		agent.Enabled = agent.Enabled && limit.Enabled
+		if strings.TrimSpace(agent.Label) == "" {
+			agent.Label = limit.Label
+		}
+		filtered = append(filtered, agent)
+		seen[id] = struct{}{}
+	}
+	for _, limit := range allowed {
+		id := normalizeWorkbenchAgentID(limit.ID)
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		filtered = append(filtered, workbenchAgentInfo{
+			ID:      id,
+			Label:   limit.Label,
+			Command: limit.Command,
+			Enabled: false,
+		})
+	}
+	return filtered
+}
+
+func mergeWorkbenchSessions(primary []workbenchSessionInfo, secondary []workbenchSessionInfo, account string) []workbenchSessionInfo {
 	if len(secondary) == 0 {
 		return primary
 	}
+	account = normalizeTunnelAccount(account)
 	seen := make(map[string]struct{}, len(primary)+len(secondary))
 	merged := make([]workbenchSessionInfo, 0, len(primary)+len(secondary))
 	for _, item := range primary {
@@ -985,6 +1276,9 @@ func mergeWorkbenchSessions(primary []workbenchSessionInfo, secondary []workbenc
 		if strings.TrimSpace(item.ID) == "" {
 			continue
 		}
+		if account != "" && normalizeTunnelAccount(item.Account) != account {
+			continue
+		}
 		if _, ok := seen[item.ID]; ok {
 			continue
 		}
@@ -996,8 +1290,33 @@ func mergeWorkbenchSessions(primary []workbenchSessionInfo, secondary []workbenc
 	return merged
 }
 
+func filterWorkbenchFileEntriesToPolicy(entries []workbenchFileEntry, allowPaths []string) []workbenchFileEntry {
+	out := entries[:0]
+	for _, entry := range entries {
+		if pathWithinAllowed(entry.Path, allowPaths) {
+			out = append(out, entry)
+		}
+	}
+	return out
+}
+
+func firstAllowedPath(preferred string, allowPaths []string) string {
+	preferred = config.NormalizePath(preferred)
+	if preferred != "" && pathWithinAllowed(preferred, allowPaths) {
+		return preferred
+	}
+	for _, path := range allowPaths {
+		path = config.NormalizePath(path)
+		if path != "" {
+			return path
+		}
+	}
+	return ""
+}
+
 func (s *Server) workbenchWS(w http.ResponseWriter, r *http.Request) {
-	if !s.workbenchAuthorized(r) {
+	identity, ok := s.workbenchIdentity(r)
+	if !ok {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -1019,6 +1338,7 @@ func (s *Server) workbenchWS(w http.ResponseWriter, r *http.Request) {
 	cols := queryUint16(r, "cols")
 	session, _, err := s.workbench.getOrCreate(workbenchStartOptions{
 		SessionID: r.URL.Query().Get("session_id"),
+		Account:   identity.Account,
 		Agent:     r.URL.Query().Get("agent"),
 		WorkDir:   r.URL.Query().Get("work_dir"),
 		Target:    r.URL.Query().Get("target"),
@@ -1128,27 +1448,45 @@ func (s *Server) workbenchFiles(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	identity, _ := s.workbenchIdentity(r)
 	if s.runtimeIsTunnel() {
-		client := s.tunnel.current()
+		client := s.tunnelClientForAccount(identity.Account)
 		if client == nil {
 			http.Error(w, tunnelUnavailable().Error(), http.StatusServiceUnavailable)
 			return
 		}
+		cfg := s.config.Snapshot()
+		policyCfg := s.policyForAccount(identity.Account, cfg.Policy)
+		requestedPath := config.NormalizePath(r.URL.Query().Get("path"))
+		if requestedPath == "" {
+			info := client.info()
+			requestedPath = firstAllowedPath(info.workDir, filterAllowedPaths(info.allowPaths, policyCfg.AllowPaths))
+		}
+		if !pathWithinAllowed(requestedPath, policyCfg.AllowPaths) {
+			http.Error(w, "path is outside allowed roots", http.StatusForbidden)
+			return
+		}
 		var response workbenchFilesResponse
-		if err := client.request(r.Context(), "files", tunnelFilesRequest{Path: r.URL.Query().Get("path")}, &response); err != nil {
+		if err := client.request(r.Context(), "files", tunnelFilesRequest{Path: requestedPath}, &response); err != nil {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
+		}
+		response.AllowPaths = filterAllowedPaths(response.AllowPaths, policyCfg.AllowPaths)
+		response.Entries = filterWorkbenchFileEntriesToPolicy(response.Entries, policyCfg.AllowPaths)
+		if response.Parent != "" && !pathWithinAllowed(response.Parent, policyCfg.AllowPaths) {
+			response.Parent = ""
 		}
 		writeJSON(w, http.StatusOK, response)
 		return
 	}
 
 	cfg := s.config.Snapshot()
+	policyCfg := s.policyForAccount(identity.Account, cfg.Policy)
 	path := config.NormalizePath(r.URL.Query().Get("path"))
 	if path == "" {
 		path = config.NormalizePath(cfg.Edge.WorkDir)
 	}
-	if !pathWithinAllowed(path, cfg.Policy.AllowPaths) {
+	if !pathWithinAllowed(path, policyCfg.AllowPaths) {
 		http.Error(w, "path is outside allowed roots", http.StatusForbidden)
 		return
 	}
@@ -1184,13 +1522,13 @@ func (s *Server) workbenchFiles(w http.ResponseWriter, r *http.Request) {
 	})
 
 	parent := parentPath(path)
-	if parent != "" && !pathWithinAllowed(parent, cfg.Policy.AllowPaths) {
+	if parent != "" && !pathWithinAllowed(parent, policyCfg.AllowPaths) {
 		parent = ""
 	}
 	writeJSON(w, http.StatusOK, workbenchFilesResponse{
 		Path:       path,
 		Parent:     parent,
-		AllowPaths: slices.Clone(cfg.Policy.AllowPaths),
+		AllowPaths: slices.Clone(policyCfg.AllowPaths),
 		Entries:    items,
 	})
 }
@@ -1201,14 +1539,26 @@ func (s *Server) workbenchFile(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	identity, _ := s.workbenchIdentity(r)
 	if s.runtimeIsTunnel() {
-		client := s.tunnel.current()
+		client := s.tunnelClientForAccount(identity.Account)
 		if client == nil {
 			http.Error(w, tunnelUnavailable().Error(), http.StatusServiceUnavailable)
 			return
 		}
+		cfg := s.config.Snapshot()
+		policyCfg := s.policyForAccount(identity.Account, cfg.Policy)
+		path := config.NormalizePath(r.URL.Query().Get("path"))
+		if path == "" {
+			http.Error(w, "path is required", http.StatusBadRequest)
+			return
+		}
+		if !pathWithinAllowed(path, policyCfg.AllowPaths) {
+			http.Error(w, "path is outside allowed roots", http.StatusForbidden)
+			return
+		}
 		var response workbenchFileResponse
-		if err := client.request(r.Context(), "file", tunnelFileRequest{Path: r.URL.Query().Get("path")}, &response); err != nil {
+		if err := client.request(r.Context(), "file", tunnelFileRequest{Path: path}, &response); err != nil {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
 		}
@@ -1217,12 +1567,13 @@ func (s *Server) workbenchFile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	cfg := s.config.Snapshot()
+	policyCfg := s.policyForAccount(identity.Account, cfg.Policy)
 	path := config.NormalizePath(r.URL.Query().Get("path"))
 	if path == "" {
 		http.Error(w, "path is required", http.StatusBadRequest)
 		return
 	}
-	if !pathWithinAllowed(path, cfg.Policy.AllowPaths) {
+	if !pathWithinAllowed(path, policyCfg.AllowPaths) {
 		http.Error(w, "path is outside allowed roots", http.StatusForbidden)
 		return
 	}
@@ -1262,14 +1613,26 @@ func (s *Server) workbenchWarmup(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	identity, _ := s.workbenchIdentity(r)
 	if s.runtimeIsTunnel() {
-		client := s.tunnel.current()
+		client := s.tunnelClientForAccount(identity.Account)
 		if client == nil {
 			http.Error(w, tunnelUnavailable().Error(), http.StatusServiceUnavailable)
 			return
 		}
+		cfg := s.config.Snapshot()
+		policyCfg := s.policyForAccount(identity.Account, cfg.Policy)
+		path := config.NormalizePath(r.URL.Query().Get("path"))
+		if path == "" {
+			info := client.info()
+			path = firstAllowedPath(info.workDir, filterAllowedPaths(info.allowPaths, policyCfg.AllowPaths))
+		}
+		if !pathWithinAllowed(path, policyCfg.AllowPaths) {
+			http.Error(w, "path is outside allowed roots", http.StatusForbidden)
+			return
+		}
 		var response workbenchWarmupResponse
-		if err := client.request(r.Context(), "warmup", tunnelWarmupRequest{Path: r.URL.Query().Get("path")}, &response); err != nil {
+		if err := client.request(r.Context(), "warmup", tunnelWarmupRequest{Path: path}, &response); err != nil {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
 		}
@@ -1278,11 +1641,12 @@ func (s *Server) workbenchWarmup(w http.ResponseWriter, r *http.Request) {
 	}
 
 	cfg := s.config.Snapshot()
+	policyCfg := s.policyForAccount(identity.Account, cfg.Policy)
 	root := config.NormalizePath(r.URL.Query().Get("path"))
 	if root == "" {
 		root = config.NormalizePath(cfg.Edge.WorkDir)
 	}
-	if !pathWithinAllowed(root, cfg.Policy.AllowPaths) {
+	if !pathWithinAllowed(root, policyCfg.AllowPaths) {
 		http.Error(w, "path is outside allowed roots", http.StatusForbidden)
 		return
 	}
@@ -1296,7 +1660,7 @@ func (s *Server) workbenchWarmup(w http.ResponseWriter, r *http.Request) {
 	}
 
 	start := time.Now()
-	response := warmupWorkbenchTree(r.Context(), root, cfg.Policy.AllowPaths)
+	response := warmupWorkbenchTree(r.Context(), root, policyCfg.AllowPaths)
 	response.DurationMS = time.Since(start).Milliseconds()
 	writeJSON(w, http.StatusOK, response)
 }
@@ -1307,16 +1671,40 @@ func (s *Server) workbenchDiff(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	identity, _ := s.workbenchIdentity(r)
 	if s.runtimeIsTunnel() {
-		client := s.tunnel.current()
+		client := s.tunnelClientForAccount(identity.Account)
 		if client == nil {
 			http.Error(w, tunnelUnavailable().Error(), http.StatusServiceUnavailable)
 			return
 		}
+		cfg := s.config.Snapshot()
+		policyCfg := s.policyForAccount(identity.Account, cfg.Policy)
+		workDir := config.NormalizePath(r.URL.Query().Get("work_dir"))
+		path := config.NormalizePath(r.URL.Query().Get("path"))
+		if workDir == "" {
+			info := client.info()
+			workDir = firstAllowedPath(info.workDir, filterAllowedPaths(info.allowPaths, policyCfg.AllowPaths))
+		}
+		if !pathWithinAllowed(workDir, policyCfg.AllowPaths) {
+			http.Error(w, "work_dir is outside allowed roots", http.StatusForbidden)
+			return
+		}
+		if path != "" {
+			if !pathWithinAllowed(path, policyCfg.AllowPaths) {
+				http.Error(w, "path is outside allowed roots", http.StatusForbidden)
+				return
+			}
+			rel, err := filepath.Rel(workDir, path)
+			if err != nil || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || rel == ".." {
+				http.Error(w, "path is outside work_dir", http.StatusForbidden)
+				return
+			}
+		}
 		var response workbenchDiffResponse
 		if err := client.request(r.Context(), "diff", tunnelDiffRequest{
-			WorkDir: r.URL.Query().Get("work_dir"),
-			Path:    r.URL.Query().Get("path"),
+			WorkDir: workDir,
+			Path:    path,
 		}, &response); err != nil {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
@@ -1326,11 +1714,12 @@ func (s *Server) workbenchDiff(w http.ResponseWriter, r *http.Request) {
 	}
 
 	cfg := s.config.Snapshot()
+	policyCfg := s.policyForAccount(identity.Account, cfg.Policy)
 	workDir := config.NormalizePath(r.URL.Query().Get("work_dir"))
 	if workDir == "" {
 		workDir = config.NormalizePath(cfg.Edge.WorkDir)
 	}
-	if !pathWithinAllowed(workDir, cfg.Policy.AllowPaths) {
+	if !pathWithinAllowed(workDir, policyCfg.AllowPaths) {
 		http.Error(w, "work_dir is outside allowed roots", http.StatusForbidden)
 		return
 	}
@@ -1338,7 +1727,7 @@ func (s *Server) workbenchDiff(w http.ResponseWriter, r *http.Request) {
 	var relPath string
 	if rawPath := strings.TrimSpace(r.URL.Query().Get("path")); rawPath != "" {
 		path := config.NormalizePath(rawPath)
-		if !pathWithinAllowed(path, cfg.Policy.AllowPaths) {
+		if !pathWithinAllowed(path, policyCfg.AllowPaths) {
 			http.Error(w, "path is outside allowed roots", http.StatusForbidden)
 			return
 		}

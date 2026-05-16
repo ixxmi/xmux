@@ -52,20 +52,30 @@ func (d Duration) MarshalYAML() (any, error) {
 }
 
 type Config struct {
-	Server ServerConfig  `yaml:"server"`
-	Edge   EdgeConfig    `yaml:"edge"`
-	Policy policy.Config `yaml:"policy"`
+	Server      ServerConfig      `yaml:"server"`
+	CloudTunnel CloudTunnelConfig `yaml:"cloud_tunnel"`
+	Edge        EdgeConfig        `yaml:"edge"`
+	Policy      policy.Config     `yaml:"policy"`
 }
 
 type ServerConfig struct {
-	Addr               string   `yaml:"addr"`
-	AuthToken          string   `yaml:"auth_token"`
-	AdminToken         string   `yaml:"admin_token"`
-	TunnelToken        string   `yaml:"tunnel_token"`
-	AuditLogPath       string   `yaml:"audit_log_path"`
-	WorkbenchStatePath string   `yaml:"workbench_state_path"`
-	AllowHosts         []string `yaml:"allow_hosts"`
-	AdminIPAllowlist   []string `yaml:"admin_ip_allowlist"`
+	Addr                       string   `yaml:"addr"`
+	AdminUsername              string   `yaml:"admin_username"`
+	AdminPassword              string   `yaml:"admin_password"`
+	DatabasePath               string   `yaml:"database_path"`
+	AccountStorePath           string   `yaml:"account_store_path"`
+	AccountRegistrationEnabled *bool    `yaml:"account_registration_enabled"`
+	AuditLogPath               string   `yaml:"audit_log_path"`
+	WorkbenchStatePath         string   `yaml:"workbench_state_path"`
+	AllowHosts                 []string `yaml:"allow_hosts"`
+	AdminIPAllowlist           []string `yaml:"admin_ip_allowlist"`
+}
+
+type CloudTunnelConfig struct {
+	Enabled    bool   `yaml:"enabled"`
+	GatewayURL string `yaml:"gateway_url"`
+	Account    string `yaml:"account,omitempty"`
+	SessionID  string `yaml:"session_id,omitempty"`
 }
 
 type EdgeConfig struct {
@@ -92,11 +102,26 @@ func Load(path string) (*Config, error) {
 	if cfg.Server.Addr == "" {
 		cfg.Server.Addr = "127.0.0.1:8080"
 	}
+	if cfg.Server.AdminUsername == "" {
+		cfg.Server.AdminUsername = "admin"
+	}
+	if cfg.Server.AdminPassword == "" {
+		cfg.Server.AdminPassword = "admin123456"
+	}
+	if cfg.Server.DatabasePath == "" {
+		cfg.Server.DatabasePath = "data/xmux.db"
+	}
 	if cfg.Server.AuditLogPath == "" {
 		cfg.Server.AuditLogPath = "data/audit.jsonl"
 	}
 	if cfg.Server.WorkbenchStatePath == "" {
 		cfg.Server.WorkbenchStatePath = "data/workbench_sessions.json"
+	}
+	if cfg.Server.AccountStorePath == "" {
+		cfg.Server.AccountStorePath = "data/accounts.json"
+	}
+	if cfg.Server.AccountRegistrationEnabled == nil {
+		cfg.Server.AccountRegistrationEnabled = boolPtr(true)
 	}
 	if cfg.Edge.ID == "" {
 		cfg.Edge.ID = "local-edge"
@@ -117,15 +142,6 @@ func Load(path string) (*Config, error) {
 		cfg.Edge.PreviewPorts = []int{3000, 5173, 8080}
 	}
 	cfg.Policy.AllowPaths = normalizePaths(cfg.Policy.AllowPaths)
-	if cfg.Server.AuthToken == "" {
-		return nil, errors.New("server.auth_token is required")
-	}
-	if cfg.Server.AdminToken == "" {
-		cfg.Server.AdminToken = cfg.Server.AuthToken
-	}
-	if cfg.Server.TunnelToken == "" {
-		cfg.Server.TunnelToken = cfg.Server.AuthToken
-	}
 	return &cfg, nil
 }
 
@@ -153,12 +169,14 @@ func Ensure(path string) (bool, error) {
 func Default() Config {
 	return Config{
 		Server: ServerConfig{
-			Addr:               "127.0.0.1:18001",
-			AuthToken:          "change-me-terminal-token",
-			AdminToken:         "change-me-admin-token",
-			TunnelToken:        "change-me-tunnel-token",
-			AuditLogPath:       "data/audit.jsonl",
-			WorkbenchStatePath: "data/workbench_sessions.json",
+			Addr:                       "127.0.0.1:18001",
+			AdminUsername:              "admin",
+			AdminPassword:              "admin123456",
+			DatabasePath:               "data/xmux.db",
+			AccountStorePath:           "data/accounts.json",
+			AccountRegistrationEnabled: boolPtr(true),
+			AuditLogPath:               "data/audit.jsonl",
+			WorkbenchStatePath:         "data/workbench_sessions.json",
 			AllowHosts: []string{
 				"127.0.0.1:18001",
 				"localhost:18001",
@@ -167,6 +185,9 @@ func Default() Config {
 				"127.0.0.1",
 				"::1",
 			},
+		},
+		CloudTunnel: CloudTunnelConfig{
+			Enabled: false,
 		},
 		Edge: EdgeConfig{
 			ID:      "local-edge",
@@ -240,12 +261,6 @@ func (s *Store) Snapshot() Config {
 
 func (s *Store) Update(next Config) error {
 	next = cloneConfig(next)
-	if next.Server.AuthToken == "" {
-		return errors.New("server.auth_token is required")
-	}
-	if next.Server.AdminToken == "" {
-		return errors.New("server.admin_token is required")
-	}
 	if len(next.Policy.Commands) == 0 {
 		return errors.New("policy.commands must not be empty")
 	}
@@ -275,19 +290,38 @@ func (s *Store) PolicyEngine() (*policy.Engine, error) {
 	return policy.NewEngine(cfg.Policy)
 }
 
-func (s *Store) TerminalToken() string {
+func (s *Store) UserPolicyEngine(account string, resolver interface {
+	UserPolicy(string, policy.Config) (policy.Config, error)
+}) (*policy.Engine, error) {
 	cfg := s.Snapshot()
-	return cfg.Server.AuthToken
+	if resolver == nil || strings.TrimSpace(account) == "" {
+		return policy.NewEngine(cfg.Policy)
+	}
+	userPolicy, err := resolver.UserPolicy(account, cfg.Policy)
+	if err != nil {
+		return nil, err
+	}
+	return policy.NewEngine(userPolicy)
 }
 
-func (s *Store) AdminToken() string {
+func (s *Store) DatabasePath() string {
 	cfg := s.Snapshot()
-	return cfg.Server.AdminToken
+	return cfg.Server.DatabasePath
 }
 
-func (s *Store) TunnelToken() string {
+func (s *Store) AccountStorePath() string {
 	cfg := s.Snapshot()
-	return cfg.Server.TunnelToken
+	return cfg.Server.AccountStorePath
+}
+
+func (s *Store) AccountRegistrationEnabled() bool {
+	cfg := s.Snapshot()
+	return cfg.Server.RegistrationEnabled()
+}
+
+func (s *Store) CloudTunnel() CloudTunnelConfig {
+	cfg := s.Snapshot()
+	return cfg.CloudTunnel
 }
 
 func (s *Store) AllowHosts() []string {
@@ -303,12 +337,27 @@ func (s *Store) AdminIPAllowlist() []string {
 func cloneConfig(cfg Config) Config {
 	cfg.Server.AllowHosts = slices.Clone(cfg.Server.AllowHosts)
 	cfg.Server.AdminIPAllowlist = slices.Clone(cfg.Server.AdminIPAllowlist)
+	if cfg.Server.AccountRegistrationEnabled != nil {
+		value := *cfg.Server.AccountRegistrationEnabled
+		cfg.Server.AccountRegistrationEnabled = &value
+	}
 	cfg.Edge.Env = cloneMap(cfg.Edge.Env)
 	cfg.Edge.PreviewPorts = slices.Clone(cfg.Edge.PreviewPorts)
 	cfg.Policy.Deny = slices.Clone(cfg.Policy.Deny)
 	cfg.Policy.AllowPaths = slices.Clone(cfg.Policy.AllowPaths)
 	cfg.Policy.Commands = cloneCommands(cfg.Policy.Commands)
 	return cfg
+}
+
+func (c ServerConfig) RegistrationEnabled() bool {
+	if c.AccountRegistrationEnabled == nil {
+		return true
+	}
+	return *c.AccountRegistrationEnabled
+}
+
+func boolPtr(value bool) *bool {
+	return &value
 }
 
 func cloneCommands(commands map[string]policy.CommandPolicy) map[string]policy.CommandPolicy {

@@ -46,7 +46,7 @@ go build -o cloud-terminal ./cmd/cloud-terminal
 ```bash
 ./cloud-terminal -mode local
 ./cloud-terminal -mode cloud
-./cloud-terminal -mode agent -gateway https://cloud.example.com:5955
+./cloud-terminal -mode agent
 ```
 
 `local` 是单机模式；`cloud` 是公网 Gateway 模式；`agent` 是本地电脑主动连接公网 Gateway 的执行端模式。
@@ -73,11 +73,15 @@ http://127.0.0.1:18001
 
 默认入口会跳转到手机端 AI 工作台 `/mobile/`。
 
-默认开发令牌：
+默认管理员账号是 `admin` / `admin123456`，首次进入后台后应立即修改配置里的 `server.admin_password`。普通云账号可在 `/mobile/`、`/chat/` 或根终端页注册/登录；云账号管理只在后台开放给管理员。
+
+用户后台入口：
 
 ```text
-change-me-terminal-token
+http://127.0.0.1:18001/user/
 ```
+
+普通用户可在用户后台管理自己账号的本地穿透开关、命令策略和文件路径；网关地址仍由管理员统一配置，用户后台不会显示或编辑网关地址。
 
 后台管理入口：
 
@@ -97,21 +101,9 @@ http://127.0.0.1:18001/mobile/
 http://127.0.0.1:18001/chat/
 ```
 
-默认后台管理令牌：
+本地端启用穿透时，由管理员在后台访问控制里统一配置云端网关地址，并点击“使用当前用户”绑定当前登录会话；Agent 启动后会直接复用这份配置，其他云账号登录后也复用同一个网关入口，不需要再单独输入用户名密码或网关地址。
 
-```text
-change-me-admin-token
-```
-
-本地 Agent 连接公网 Gateway 使用独立隧道令牌：
-
-```yaml
-server:
-  tunnel_token: change-me-tunnel-token
-```
-
-上线前必须修改 `policy.yaml` 里的 `server.auth_token` 和 `server.admin_token`，并通过反向代理提供 HTTPS/WSS。
-后台管理使用独立的 `server.admin_token` 和 `server.admin_ip_allowlist`，建议只允许内网或本机 IP 访问。
+上线前建议先创建管理员账号，然后关闭 `server.account_registration_enabled`，并通过反向代理提供 HTTPS/WSS。后台管理仍受 `server.admin_ip_allowlist` 限制，建议只允许内网或固定管理端 IP 访问。
 
 如果通过局域网 IP、反向代理域名或非默认端口访问，把浏览器实际访问的 host 加到 `server.allow_hosts`。同源访问会自动通过，例如页面是 `http://127.0.0.1:18001` 时，WebSocket Origin 也是这个 host，不需要额外配置。
 
@@ -194,7 +186,8 @@ policy:
 
 `/admin/` 是独立管理页面，支持：
 
-- 修改终端访问 token 和后台管理 token。
+- 查看云账号数据库路径并配置账号注册开关。
+- 配置本地端连接云端的开关，并绑定当前管理员会话作为穿透凭证。
 - 配置 Gateway Origin allowlist。
 - 配置后台管理 IP allowlist，支持单 IP 和 CIDR。
 - 管理命令白名单、黑名单、子命令、二进制路径、交互式开关和最大参数数。
@@ -202,19 +195,22 @@ policy:
 
 保存后配置会写回启动时使用的配置文件，默认是当前工作目录的 `policy.yaml`，并立即更新内存配置；下一次终端鉴权、WebSocket Origin 检查、管理页 IP 检查和命令策略判断都会使用新配置，不需要重启服务。
 
+云账号列表和账号创建只对管理员开放。普通用户可进入 `/user/` 管理自己的本地穿透开关、命令策略和允许文件路径；这些用户级设置只能在管理员全局策略范围内收缩权限，不能越过全局上限。
+
 ## 手机端 AI Workbench
 
 `/mobile/` 是独立页面，不影响现有 `/` 终端页。它面向手机远程接管电脑上的 Codex CLI、Claude Code 或 Gemini CLI：
 
-- 首次进入输入终端鉴权 token，后端写入 HttpOnly cookie。
-- 鉴权后会先选择 AI CLI 类型，再浏览 `policy.allow_paths` 允许范围内的目录或文件，选择目标后才启动。
+- 首次进入使用云账号密码登录或注册，后端写入 HttpOnly 会话 cookie。
+- 鉴权后会先选择 AI CLI 类型，再浏览当前账号允许路径内的目录或文件，选择目标后才启动。
+- 文件菜单会显示当前账号可访问路径；如果用户没有开启本地穿透或客户端未连接，除设置页外不会进入终端、文件、Diff 或预览。
 - 选择目录时 AI CLI 在该目录启动；选择文件时在文件所在目录启动，并把文件名作为启动参数。
 - 手机端把 `session_id` 保存在浏览器本地；刷新或重新打开页面后可通过 Reconnect attach 到原会话。
 - WebSocket 断开只会 detach，不会杀掉 PTY；只有点 Stop 或 CLI 自己退出才会结束当前会话。
 - New 会启动一个新的会话；旧会话如果还在运行，会继续保留，可通过已保存的 `session_id` 重新 attach。
 - 同一个文件夹下可以分别开启 Codex、Claude Code、Gemini 会话，进程抽屉按 agent 标识区分。
 - Terminal 页支持 xterm 原始交互，并提供 Esc、Tab、方向键、Ctrl+C、Ctrl+D 快捷键栏。
-- Files 页可以浏览 `policy.allow_paths` 允许范围内的文件，并查看文件内容。
+- Files 页可以浏览当前账号允许范围内的文件，并查看文件内容。
 - Diff 页显示当前工作区的 `git status`、`git diff --stat` 和 `git diff`。
 - Preview 页可以打开本机开发服务器，例如 `localhost:3000`、`localhost:5173`、`localhost:8080`。
 
@@ -254,7 +250,7 @@ policy:
 
 `/chat/` 是 Codex App 风格的轻量聊天入口，同样复用 `/cloud-terminal-api/ws/workbench` 的持久 AI CLI PTY 会话：
 
-- 首次进入输入终端鉴权 token。
+- 首次进入使用云账号密码登录或注册。
 - 顶部显示连接状态、工作区、当前会话、agent、节点和历史会话数量。
 - 中间是 Request / 当前 Agent / Status 信息块，空会话会展示常用任务入口。
 - 底部输入框支持 Enter 发送，Shift+Enter 换行。

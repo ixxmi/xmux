@@ -1,3 +1,4 @@
 /cloud-terminal
 /data/*.jsonl
+/data/*.db
 /.DS_Store

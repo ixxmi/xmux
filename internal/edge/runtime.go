@@ -38,12 +38,21 @@ type Runtime struct {
 	policyProvider interface {
 		PolicyEngine() (*policy.Engine, error)
 	}
+	userPolicyResolver interface {
+		UserPolicy(string, policy.Config) (policy.Config, error)
+	}
 	audit          audit.Writer
 	defaultEnv     map[string]string
 	defaultDir     string
 	commandTimeout time.Duration
 	maxOutputSize  int64
 	logger         *slog.Logger
+}
+
+func (r *Runtime) SetUserPolicyResolver(resolver interface {
+	UserPolicy(string, policy.Config) (policy.Config, error)
+}) {
+	r.userPolicyResolver = resolver
 }
 
 type InteractiveSession struct {
@@ -133,7 +142,7 @@ func (r *Runtime) Exec(ctx context.Context, req ExecRequest) ExecResult {
 		return r.execCD(req, start)
 	}
 
-	decision, err := r.decide(req.Command, req.Args)
+	decision, err := r.decideForUser(req.User, req.Command, req.Args)
 	if err != nil {
 		return r.denied(req, req.Command, req.Args, err)
 	}
@@ -207,7 +216,7 @@ func (r *Runtime) Exec(ctx context.Context, req ExecRequest) ExecResult {
 }
 
 func (r *Runtime) StartInteractive(ctx context.Context, req ExecRequest, opts InteractiveOptions) (*InteractiveSession, error) {
-	decision, err := r.decide(req.Command, req.Args)
+	decision, err := r.decideForUser(req.User, req.Command, req.Args)
 	if err != nil {
 		result := r.denied(req, req.Command, req.Args, err)
 		return nil, errors.New(result.Stderr)
@@ -257,7 +266,7 @@ func (r *Runtime) StartInteractive(ctx context.Context, req ExecRequest, opts In
 }
 
 func (r *Runtime) execCD(req ExecRequest, start time.Time) ExecResult {
-	decision, err := r.decide(req.Command, req.Args)
+	decision, err := r.decideForUser(req.User, req.Command, req.Args)
 	if err != nil {
 		return r.denied(req, req.Command, req.Args, err)
 	}
@@ -274,7 +283,7 @@ func (r *Runtime) execCD(req ExecRequest, start time.Time) ExecResult {
 		target = filepath.Join(r.workDir(req.WorkDir), target)
 	}
 	target = filepath.Clean(target)
-	if _, err := r.decide(req.Command, []string{target}); err != nil {
+	if _, err := r.decideForUser(req.User, req.Command, []string{target}); err != nil {
 		return r.denied(req, req.Command, []string{target}, err)
 	}
 
@@ -310,8 +319,26 @@ func (r *Runtime) execCD(req ExecRequest, start time.Time) ExecResult {
 }
 
 func (r *Runtime) decide(command string, args []string) (*policy.Decision, error) {
+	return r.decideForUser("", command, args)
+}
+
+func (r *Runtime) decideForUser(user string, command string, args []string) (*policy.Decision, error) {
 	if r.policyProvider == nil {
 		return nil, fmt.Errorf("%w: policy provider is not configured", policy.ErrDenied)
+	}
+	if user != "" && r.userPolicyResolver != nil {
+		type accountPolicyProvider interface {
+			UserPolicyEngine(string, interface {
+				UserPolicy(string, policy.Config) (policy.Config, error)
+			}) (*policy.Engine, error)
+		}
+		if provider, ok := r.policyProvider.(accountPolicyProvider); ok {
+			engine, err := provider.UserPolicyEngine(user, r.userPolicyResolver)
+			if err != nil {
+				return nil, fmt.Errorf("load user policy: %w", err)
+			}
+			return engine.Decide(command, args)
+		}
 	}
 	engine, err := r.policyProvider.PolicyEngine()
 	if err != nil {

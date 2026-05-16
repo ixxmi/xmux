@@ -3,21 +3,22 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Cloud Terminal Admin</title>
+    <title>xmux Admin</title>
     <link rel="stylesheet" href="/admin/styles.css" />
   </head>
   <body>
     <main class="admin-layout">
       <aside class="sidebar">
         <div class="brand">
-          <div class="brand-mark">CT</div>
+          <div class="brand-mark">xm</div>
           <div>
-            <span>Cloud Terminal</span>
-            <strong>Admin Console</strong>
+            <span>xmux</span>
+            <strong>管理后台</strong>
           </div>
         </div>
         <nav class="nav">
           <button class="nav-item active" type="button" data-section="access">访问控制</button>
+          <button class="nav-item" type="button" data-section="accounts">云账号</button>
           <button class="nav-item" type="button" data-section="commands">命令策略</button>
           <button class="nav-item" type="button" data-section="paths">文件路径</button>
         </nav>
@@ -34,21 +35,81 @@
             <span>Policy Live</span>
             <span>IP Guard</span>
             <button id="saveButton" type="button">Save Changes</button>
+            <div class="account-menu" id="accountMenu">
+              <button id="accountTrigger" class="account-trigger" type="button" aria-haspopup="true" aria-expanded="false">
+                <span id="accountAvatar" class="account-avatar">--</span>
+              </button>
+              <div id="accountDropdown" class="account-dropdown" hidden>
+                <div class="account-info">
+                  <span class="account-name" id="accountName">-</span>
+                  <span class="account-role" id="accountRole">-</span>
+                </div>
+                <button id="profileButton" class="account-item" type="button">个人资料</button>
+                <button id="logoutButton" class="account-item danger" type="button">退出登录</button>
+              </div>
+            </div>
           </div>
         </header>
+
+        <div id="profileModal" class="modal" hidden>
+          <div class="modal-backdrop" data-modal-close></div>
+          <div class="modal-card" role="dialog" aria-labelledby="profileModalTitle">
+            <header class="modal-header">
+              <h2 id="profileModalTitle">个人资料</h2>
+              <button class="modal-close" type="button" data-modal-close aria-label="关闭">×</button>
+            </header>
+            <div class="modal-body">
+              <label>用户名<input id="profileUsername" readonly /></label>
+              <label>角色<input id="profileRoleInput" readonly /></label>
+              <label>当前密码<input id="profileCurrentPassword" type="password" autocomplete="current-password" placeholder="当前密码" /></label>
+              <label>新密码<input id="profileNewPassword" type="password" autocomplete="new-password" placeholder="至少 8 位" /></label>
+              <p id="profileMessage" class="modal-message"></p>
+            </div>
+            <footer class="modal-footer">
+              <button class="secondary" type="button" data-modal-close>取消</button>
+              <button id="profileSaveButton" type="button">保存修改</button>
+            </footer>
+          </div>
+        </div>
 
         <section class="section active" id="section-access">
           <div class="section-grid two">
             <article class="panel">
-              <h2>访问令牌</h2>
-              <label>Terminal token<input id="authToken" type="password" /></label>
-              <label>Admin token<input id="adminToken" type="password" /></label>
-              <label>Tunnel token<input id="tunnelToken" type="password" /></label>
+              <h2>账号入口</h2>
+              <label>Database path<input id="databasePath" readonly /></label>
+              <h2>本地穿透</h2>
+              <label class="check standalone"><input id="cloudTunnelEnabled" type="checkbox" /> 本地端启动后连接云端</label>
+              <label>Cloud gateway URL<input id="cloudGatewayURL" placeholder="https://cloud.example.com:5955" /></label>
+              <div class="account-list-head">
+                <span id="cloudTunnelAccount">未绑定账号</span>
+                <button id="bindTunnelAccount" class="secondary" type="button">使用当前用户</button>
+              </div>
             </article>
             <article class="panel">
               <h2>网络边界</h2>
               <label>Gateway Origin 白名单<textarea id="allowHosts" rows="6"></textarea></label>
               <label>后台管理 IP 白名单<textarea id="adminIPs" rows="6" placeholder="127.0.0.1&#10;192.168.1.0/24"></textarea></label>
+            </article>
+          </div>
+        </section>
+
+        <section class="section" id="section-accounts">
+          <div class="section-grid two">
+            <article class="panel">
+              <h2>账号注册</h2>
+              <label class="check standalone"><input id="accountRegistrationEnabled" type="checkbox" /> 允许云端注册新账号</label>
+              <div class="account-list-head">
+                <span>已注册账号</span>
+                <button id="refreshAccounts" class="secondary" type="button">Refresh</button>
+              </div>
+              <div id="accountList" class="account-list"></div>
+            </article>
+            <article class="panel">
+              <h2>创建账号</h2>
+              <label>账号<input id="newAccountUsername" autocomplete="off" placeholder="用户名或邮箱" /></label>
+              <label>密码<input id="newAccountPassword" type="password" autocomplete="new-password" placeholder="至少 8 位" /></label>
+              <label>Role<select id="newAccountRole"><option value="user">User</option><option value="admin">Admin</option></select></label>
+              <button id="createAccount" class="secondary" type="button">Create Account</button>
             </article>
           </div>
         </section>

@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-    <title>AI Mobile Workbench</title>
+    <title>xmux</title>
     <link rel="stylesheet" href="/vendor/xterm.css" />
     <link rel="stylesheet" href="/mobile/styles.css" />
   </head>
@@ -11,12 +11,18 @@
     <main class="mobile-app">
       <section id="authView" class="auth-view">
         <form id="authForm" class="auth-box">
-          <div class="auth-mark">AI</div>
-          <h1>AI Remote</h1>
+          <div class="auth-mark">xm</div>
+          <h1>xmux</h1>
           <p>连接电脑上的 AI CLI 会话</p>
-          <label for="tokenInput">Access token</label>
-          <input id="tokenInput" type="password" autocomplete="off" placeholder="输入终端鉴权 token" />
-          <button type="submit">Connect</button>
+          <div class="auth-tabs" role="tablist" aria-label="登录方式">
+            <button id="loginModeButton" class="active" type="button">登录</button>
+            <button id="registerModeButton" type="button">注册</button>
+          </div>
+          <label id="usernameLabel" for="usernameInput">账号</label>
+          <input id="usernameInput" autocomplete="username" placeholder="用户名或邮箱" />
+          <label id="passwordLabel" for="passwordInput">密码</label>
+          <input id="passwordInput" type="password" autocomplete="current-password" placeholder="云端账号密码" />
+          <button type="submit">登录</button>
           <span id="authMessage" class="auth-message"></span>
         </form>
       </section>
@@ -29,7 +35,7 @@
             </svg>
           </button>
           <div class="connection">
-            <strong>AI Remote</strong>
+            <strong>xmux</strong>
             <span id="connectionState">Disconnected</span>
           </div>
           <div class="top-actions">
@@ -79,6 +85,18 @@
             <div id="folderPickerList" class="folder-picker-list"></div>
           </div>
           <div id="processList" class="process-list"></div>
+        </section>
+
+        <section id="tunnelBlockedView" class="tunnel-block" hidden>
+          <div>
+            <span>本地穿透未开启</span>
+            <strong>先在用户后台启用当前账号的本地穿透，并启动客户端连接。</strong>
+            <p>终端、文件、Diff 和预览会在穿透客户端在线后开放。</p>
+          </div>
+          <div class="tunnel-block-actions">
+            <a href="/user/">打开用户后台</a>
+            <button id="reloadStateButton" type="button">刷新状态</button>
+          </div>
         </section>
 
         <section id="targetView" class="target-view">
@@ -148,11 +166,40 @@
           <iframe id="previewFrame" title="Local preview"></iframe>
         </section>
 
+        <section class="tab-page" data-page="settings">
+          <div class="settings-page">
+            <section class="settings-block account-card">
+              <div class="avatar" id="accountAvatar">xm</div>
+              <div>
+                <span>当前账号</span>
+                <strong id="settingsAccount">-</strong>
+                <small id="settingsRole">-</small>
+              </div>
+              <button id="logoutButton" class="ghost" type="button">退出</button>
+            </section>
+
+            <section class="settings-block">
+              <div class="settings-head">
+                <div>
+                  <span>账号信息</span>
+                  <strong>修改当前账号密码</strong>
+                </div>
+              </div>
+              <label class="settings-field">当前密码<input id="currentPasswordInput" type="password" autocomplete="current-password" /></label>
+              <label class="settings-field">新密码<input id="newPasswordInput" type="password" autocomplete="new-password" placeholder="至少 8 位" /></label>
+              <p id="profileMessage" class="settings-message"></p>
+              <button id="saveProfileButton" type="button">保存账号信息</button>
+              <a class="settings-console-link" href="/user/">进入用户后台管理穿透、命令和路径</a>
+            </section>
+          </div>
+        </section>
+
         <nav id="bottomTabs" class="bottom-tabs" aria-label="Workbench sections" hidden>
           <button class="active" type="button" data-tab="terminal">Terminal</button>
           <button type="button" data-tab="files">Files</button>
           <button type="button" data-tab="diff">Diff</button>
           <button type="button" data-tab="preview">Preview</button>
+          <button type="button" data-tab="settings">设置</button>
         </nav>
       </section>
     </main>

@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -25,7 +26,8 @@ import (
 
 type Options struct {
 	GatewayURL string
-	Token      string
+	Username   string
+	SessionID  string
 	Runtime    *edge.Runtime
 	Config     *config.Store
 	EdgeID     string
@@ -35,7 +37,8 @@ type Options struct {
 
 type Agent struct {
 	gatewayURL string
-	token      string
+	username   string
+	sessionID  string
 	runtime    *edge.Runtime
 	config     *config.Store
 	edgeID     string
@@ -52,6 +55,7 @@ type Agent struct {
 type agentSessionMeta struct {
 	ID         string
 	RequestID  string
+	Account    string
 	Agent      string
 	AgentLabel string
 	WorkDir    string
@@ -74,7 +78,8 @@ func New(opts Options) *Agent {
 	}
 	return &Agent{
 		gatewayURL: strings.TrimSpace(opts.GatewayURL),
-		token:      strings.TrimSpace(opts.Token),
+		username:   strings.TrimSpace(opts.Username),
+		sessionID:  strings.TrimSpace(opts.SessionID),
 		runtime:    opts.Runtime,
 		config:     opts.Config,
 		edgeID:     firstNonEmpty(opts.EdgeID, "local-edge"),
@@ -91,8 +96,11 @@ func (a *Agent) Run(ctx context.Context) error {
 	if a.gatewayURL == "" {
 		return errors.New("gateway url is required")
 	}
-	if a.token == "" {
-		return errors.New("tunnel token is required")
+	if a.username == "" {
+		return errors.New("cloud account username is required")
+	}
+	if a.sessionID == "" {
+		return errors.New("cloud account session is required")
 	}
 	if a.runtime == nil || a.config == nil {
 		return errors.New("runtime and config are required")
@@ -113,11 +121,13 @@ func (a *Agent) Run(ctx context.Context) error {
 }
 
 func (a *Agent) runOnce(ctx context.Context) error {
-	wsURL, err := tunnelURL(a.gatewayURL, a.token)
+	wsURL, err := tunnelURL(a.gatewayURL)
 	if err != nil {
 		return err
 	}
-	conn, _, err := websocket.DefaultDialer.DialContext(ctx, wsURL, http.Header{})
+	header := http.Header{}
+	header.Set("Authorization", basicAuth(a.username, a.sessionID))
+	conn, _, err := websocket.DefaultDialer.DialContext(ctx, wsURL, header)
 	if err != nil {
 		return err
 	}
@@ -268,12 +278,15 @@ func (a *Agent) handleStart(ctx context.Context, client *clientConn, env gateway
 	a.mu.Unlock()
 
 	agentID := normalizeAgentID(req.Agent)
-	command := strings.TrimSpace(req.Command)
-	if command == "" || normalizeAgentID(command) == agentID {
-		command = a.agentCommand(agentID)
+	bin := strings.TrimSpace(req.Bin)
+	if bin == "" {
+		bin = strings.TrimSpace(req.Command)
 	}
-	if command == "" {
-		command = agentID
+	if bin == "" || normalizeAgentID(bin) == agentID {
+		bin = a.agentCommand(agentID)
+	}
+	if bin == "" {
+		bin = agentID
 	}
 	workDir, args, err := a.resolveStartTarget(req.WorkDir, req.Target, req.Args)
 	if err != nil {
@@ -283,13 +296,16 @@ func (a *Agent) handleStart(ctx context.Context, client *clientConn, env gateway
 	execReq := edge.ExecRequest{
 		RequestID: req.RequestID,
 		SessionID: sessionID,
-		User:      "cloud",
+		User:      firstNonEmpty(normalizeTunnelAccount(req.Account), "cloud"),
 		EdgeID:    a.edgeID,
 		WorkDir:   workDir,
-		Command:   command,
+		Command:   agentID,
 		Args:      args,
 		Rows:      req.Rows,
 		Cols:      req.Cols,
+	}
+	if strings.TrimSpace(bin) != "" {
+		execReq.Args = append([]string{bin}, execReq.Args...)
 	}
 	decoder := &gateway.UTF8StreamDecoder{}
 	startedAt := time.Now()
@@ -327,8 +343,9 @@ func (a *Agent) handleStart(ctx context.Context, client *clientConn, env gateway
 	a.meta[sessionID] = agentSessionMeta{
 		ID:         sessionID,
 		RequestID:  req.RequestID,
-		Agent:      normalizeAgentID(command),
-		AgentLabel: agentLabel(command),
+		Account:    normalizeTunnelAccount(req.Account),
+		Agent:      agentID,
+		AgentLabel: agentLabel(agentID),
 		WorkDir:    workDir,
 		StartedAt:  startedAt,
 		LastActive: startedAt,
@@ -393,7 +410,7 @@ func (a *Agent) resolveStartTarget(workDir string, target string, args []string)
 	}
 	resolvedTarget := config.NormalizePath(target)
 	resolvedArgs := slices.Clone(args)
-	if resolvedTarget == "" && len(resolvedArgs) > 0 {
+	if resolvedTarget == "" && len(resolvedArgs) > 0 && !strings.HasPrefix(resolvedArgs[0], "-") {
 		candidate := config.NormalizePath(resolvedArgs[0])
 		if candidate != "" && filepath.IsAbs(candidate) {
 			resolvedTarget = candidate
@@ -446,6 +463,7 @@ func (a *Agent) sessionInfos() []gateway.WorkbenchSessionInfo {
 	for _, meta := range a.meta {
 		items = append(items, gateway.WorkbenchSessionInfo{
 			ID:         meta.ID,
+			Account:    normalizeTunnelAccount(meta.Account),
 			Agent:      meta.Agent,
 			AgentLabel: meta.AgentLabel,
 			WorkDir:    meta.WorkDir,
@@ -644,7 +662,7 @@ func mustRaw(value any) gateway.JSONRawEnvelope {
 	return raw
 }
 
-func tunnelURL(base string, token string) (string, error) {
+func tunnelURL(base string) (string, error) {
 	u, err := url.Parse(base)
 	if err != nil {
 		return "", err
@@ -655,10 +673,12 @@ func tunnelURL(base string, token string) (string, error) {
 		u.Scheme = "wss"
 	}
 	u.Path = strings.TrimRight(u.Path, "/") + "/cloud-terminal-api/tunnel/agent"
-	q := u.Query()
-	q.Set("token", token)
-	u.RawQuery = q.Encode()
 	return u.String(), nil
+}
+
+func basicAuth(username string, sessionID string) string {
+	value := base64.StdEncoding.EncodeToString([]byte(username + ":" + sessionID))
+	return "Basic " + value
 }
 
 func pathAllowed(path string, roots []string) bool {
@@ -690,6 +710,10 @@ func trim(value string, max int) string {
 		return value
 	}
 	return value[:max]
+}
+
+func normalizeTunnelAccount(account string) string {
+	return strings.TrimSpace(strings.ToLower(account))
 }
 
 func normalizeAgentID(value string) string {
