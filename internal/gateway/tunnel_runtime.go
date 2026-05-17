@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"slices"
+	"strings"
 
 	"cloud-terminal/internal/config"
 	"cloud-terminal/internal/edge"
@@ -77,7 +78,7 @@ func (r *tunnelRuntime) ResolveWorkbenchStart(opts workbenchStartOptions) (workb
 	return workbenchStartResolution{
 		EdgeID:   firstNonEmpty(info.edgeID, "local-edge"),
 		EdgeName: firstNonEmpty(info.edgeName, info.edgeID, "Local Edge"),
-		Agent:    workbenchAgent{ID: agentID, Command: firstNonEmpty(selected.Command, agentID)},
+		Agent:    workbenchAgent{ID: agentID, Command: agentID},
 		WorkDir:  workDir,
 		Target:   target,
 		Args:     slices.Clone(args),
@@ -125,7 +126,7 @@ func (r *tunnelRuntime) StartInteractive(ctx context.Context, req edge.ExecReque
 	}
 	bin := ""
 	args := slices.Clone(req.Args)
-	if len(args) > 0 && filepath.IsAbs(config.NormalizePath(args[0])) {
+	if len(args) > 0 && isRawAbsPath(args[0]) {
 		bin = args[0]
 		args = args[1:]
 	}
@@ -210,6 +211,11 @@ func firstPathArg(args []string) string {
 		}
 	}
 	return ""
+}
+
+func isRawAbsPath(value string) bool {
+	value = strings.TrimSpace(value)
+	return value != "" && filepath.IsAbs(filepath.Clean(value))
 }
 
 func (s *tunnelInteractiveSession) Write(data []byte) error {

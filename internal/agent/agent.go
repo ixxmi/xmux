@@ -418,7 +418,7 @@ func (a *Agent) handleStart(ctx context.Context, client *clientConn, env gateway
 	if bin == "" {
 		bin = strings.TrimSpace(req.Command)
 	}
-	if bin == "" || normalizeAgentID(bin) == agentID {
+	if bin == "" || isAgentCommandAlias(bin, agentID) {
 		bin = a.agentCommand(agentID)
 	}
 	if bin == "" {
@@ -440,9 +440,7 @@ func (a *Agent) handleStart(ctx context.Context, client *clientConn, env gateway
 		Rows:      req.Rows,
 		Cols:      req.Cols,
 	}
-	if strings.TrimSpace(bin) != "" {
-		execReq.Args = append([]string{bin}, execReq.Args...)
-	}
+	execReq.Args = interactiveStartArgs(bin, execReq.Args)
 	decoder := &gateway.UTF8StreamDecoder{}
 	startedAt := time.Now()
 	session, err := a.runtime.StartInteractive(ctx, execReq, edge.InteractiveOptions{
@@ -592,6 +590,31 @@ func effectiveAllowedPaths(local []string, account []string, requirePathMatch bo
 		return local
 	}
 	return nil
+}
+
+func interactiveStartArgs(bin string, args []string) []string {
+	out := slices.Clone(args)
+	bin = strings.TrimSpace(bin)
+	if bin == "" || !filepath.IsAbs(filepath.Clean(bin)) {
+		return out
+	}
+	return append([]string{bin}, out...)
+}
+
+func isAgentCommandAlias(value string, agentID string) bool {
+	value = strings.TrimSpace(strings.ToLower(value))
+	if value == "" || filepath.IsAbs(filepath.Clean(value)) || strings.Contains(value, string(filepath.Separator)) {
+		return false
+	}
+	value = strings.ReplaceAll(value, "_", "-")
+	switch normalizeAgentID(agentID) {
+	case "claude":
+		return value == "claude" || value == "claude-code"
+	case "gemini":
+		return value == "gemini"
+	default:
+		return value == "codex"
+	}
 }
 
 func cleanAgentPaths(values []string) []string {

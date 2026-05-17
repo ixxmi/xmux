@@ -579,6 +579,71 @@ func TestTunnelResolveStartUsesUserPolicy(t *testing.T) {
 	}
 }
 
+func TestTunnelResolveStartKeepsAgentCommandLogical(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	server := NewServer(Options{
+		Config: config.NewStore(filepath.Join(t.TempDir(), "policy.yaml"), &config.Config{
+			Server: config.ServerConfig{
+				DatabasePath:               filepath.Join(t.TempDir(), "xmux.db"),
+				AccountRegistrationEnabled: testBoolPtr(true),
+			},
+			Policy: policy.Config{
+				AllowPaths: []string{root},
+				Commands: map[string]policy.CommandPolicy{
+					"codex": {Enabled: true, Bin: "/usr/local/bin/codex", Interactive: true},
+				},
+			},
+		}),
+	})
+	registerTestAccount(t, server, "user@example.com", "secret123")
+	if _, err := server.accountStore().SaveUserSettings("user@example.com", userSettingsUpdatePayload{
+		CloudTunnelEnabled: true,
+		AllowPaths:         []string{root},
+		Commands: map[string]adminCommandPayload{
+			"codex": {Enabled: true, Bin: "/usr/local/bin/codex", Interactive: true},
+		},
+	}, server.config.Snapshot().Policy); err != nil {
+		t.Fatalf("save user settings: %v", err)
+	}
+	server.tunnel.set(&tunnelClient{
+		hub:        server.tunnel,
+		account:    "user@example.com",
+		edgeID:     "edge-user",
+		edgeName:   "User Edge",
+		workDir:    root,
+		allowPaths: []string{root},
+		agents:     []workbenchAgentInfo{{ID: "codex", Label: "Codex", Command: "/usr/local/bin/codex", Enabled: true}},
+		pending:    make(map[string]chan tunnelEnvelope),
+	})
+
+	resolved, err := server.runtime.(*tunnelRuntime).ResolveWorkbenchStart(workbenchStartOptions{
+		Account: "user@example.com",
+		Agent:   "codex",
+	})
+	if err != nil {
+		t.Fatalf("ResolveWorkbenchStart: %v", err)
+	}
+	if resolved.Agent.Command != "codex" {
+		t.Fatalf("resolved command = %q, want logical agent id", resolved.Agent.Command)
+	}
+}
+
+func TestIsRawAbsPathDoesNotNormalizeRelativeValues(t *testing.T) {
+	t.Parallel()
+
+	if isRawAbsPath("codex") {
+		t.Fatal("codex should not be treated as an absolute binary override")
+	}
+	if isRawAbsPath("bin/codex") {
+		t.Fatal("relative binary path should not be treated as an absolute binary override")
+	}
+	if !isRawAbsPath("/opt/homebrew/bin/codex") {
+		t.Fatal("absolute binary path should be treated as a binary override")
+	}
+}
+
 func TestResolveWorkbenchAgentRequiresInteractivePolicy(t *testing.T) {
 	t.Parallel()
 
