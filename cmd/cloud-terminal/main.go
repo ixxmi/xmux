@@ -81,12 +81,16 @@ func main() {
 			EdgeName:           cfg.Edge.Name,
 			WorkbenchStatePath: cfg.Server.WorkbenchStatePath,
 			Logger:             logger,
+			AgentMode:          true,
 		})
 
-		// Resolve the cloud base URL from discovery_url or gateway_url
-		cloudBase := strings.TrimSpace(cloudTunnel.DiscoveryURL)
+		// Resolve the cloud base URL used for proxying auth and user APIs.
+		// gateway_url is the actual cloud API server; discovery_url is used
+		// only when gateway_url is not configured (and typically points to
+		// the same host anyway).
+		cloudBase := strings.TrimSpace(cloudTunnel.GatewayURL)
 		if cloudBase == "" {
-			cloudBase = strings.TrimSpace(cloudTunnel.GatewayURL)
+			cloudBase = strings.TrimSpace(cloudTunnel.DiscoveryURL)
 		}
 
 		httpServer := &http.Server{
@@ -95,7 +99,8 @@ func main() {
 			ReadHeaderTimeout: 5 * time.Second,
 		}
 		go func() {
-			logger.Info("agent admin listening", "addr", cfg.Server.Addr, "edge_id", cfg.Edge.ID)
+			logger.Info("agent admin listening", "addr", cfg.Server.Addr, "edge_id", cfg.Edge.ID, "cloud", cloudBase)
+			logger.Info("agent admin login URL", "url", fmt.Sprintf("http://%s/agent/login.html", cfg.Server.Addr))
 			if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				logger.Error("admin server failed", "error", err)
 			}

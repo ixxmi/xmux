@@ -52,6 +52,10 @@ type Options struct {
 	EdgeName           string
 	WorkbenchStatePath string
 	Logger             *slog.Logger
+	// AgentMode signals that the server is running as an agent's local
+	// management UI. The local account store and most cloud-side handlers
+	// are skipped; the admin UI proxies auth to the upstream gateway.
+	AgentMode bool
 }
 
 type Server struct {
@@ -83,12 +87,19 @@ func NewServer(opts Options) *Server {
 	if cfg.Server.AdminPassword == "" {
 		cfg.Server.AdminPassword = "admin123456"
 	}
-	accounts, err := newAccountStore(opts.Config.DatabasePath(), opts.Config.AccountStorePath(), opts.Config.AccountRegistrationEnabled(), cfg.Server.AdminUsername, cfg.Server.AdminPassword, cfg.Policy)
-	if err != nil {
-		opts.Logger.Warn("load account store", "path", opts.Config.DatabasePath(), "error", err)
-		accounts = newFallbackAccountStore(opts.Config.DatabasePath(), opts.Config.AccountStorePath(), opts.Config.AccountRegistrationEnabled(), cfg.Server.AdminUsername)
-		if err := accounts.ensureAdmin(cfg.Server.AdminUsername, cfg.Server.AdminPassword, cfg.Policy); err != nil {
-			opts.Logger.Warn("ensure default admin", "error", err)
+	var accounts *accountStore
+	if !opts.AgentMode {
+		// Cloud / local mode keeps a real account store. Agent mode proxies
+		// auth to the upstream gateway, so a local account DB is intentionally
+		// skipped — there is a single global admin account in the cloud.
+		var err error
+		accounts, err = newAccountStore(opts.Config.DatabasePath(), opts.Config.AccountStorePath(), opts.Config.AccountRegistrationEnabled(), cfg.Server.AdminUsername, cfg.Server.AdminPassword, cfg.Policy)
+		if err != nil {
+			opts.Logger.Warn("load account store", "path", opts.Config.DatabasePath(), "error", err)
+			accounts = newFallbackAccountStore(opts.Config.DatabasePath(), opts.Config.AccountStorePath(), opts.Config.AccountRegistrationEnabled(), cfg.Server.AdminUsername)
+			if err := accounts.ensureAdmin(cfg.Server.AdminUsername, cfg.Server.AdminPassword, cfg.Policy); err != nil {
+				opts.Logger.Warn("ensure default admin", "error", err)
+			}
 		}
 	}
 	tunnelHub := newTunnelHub(opts.Logger)
@@ -98,8 +109,10 @@ func NewServer(opts Options) *Server {
 	if runtime == nil {
 		runtime = newTunnelRuntime(tunnelHub)
 	}
-	if configurable, ok := runtime.(userPolicyRuntime); ok {
-		configurable.SetUserPolicyResolver(accounts)
+	if accounts != nil {
+		if configurable, ok := runtime.(userPolicyRuntime); ok {
+			configurable.SetUserPolicyResolver(accounts)
+		}
 	}
 	server := &Server{
 		runtime:  runtime,

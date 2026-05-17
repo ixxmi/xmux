@@ -12,7 +12,14 @@ import (
 // AgentRoutes returns an HTTP handler for the agent-mode local admin server.
 // Auth and user/policy settings are proxied to the cloud gateway;
 // tunnel config and the local file browser are handled locally.
-func (s *Server) AgentRoutes(cloudBaseURL string) http.Handler {
+// There is a single global admin account: the cloud one. The local /admin/
+// path is redirected to /agent/ to make this unambiguous.
+//
+// initialCloudBaseURL is used as a fallback if the runtime config does not
+// have a gateway_url / discovery_url; in normal operation the proxy reads
+// the live value from the config store so admin changes take effect without
+// restarting.
+func (s *Server) AgentRoutes(initialCloudBaseURL string) http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/cloud-terminal-api/health", s.health)
@@ -23,7 +30,7 @@ func (s *Server) AgentRoutes(cloudBaseURL string) http.Handler {
 	mux.HandleFunc("/cloud-terminal-api/admin/fs", s.agentLocalFS)
 
 	// Proxy auth + user settings to cloud
-	proxy := buildCloudProxy(cloudBaseURL)
+	proxy := s.dynamicCloudProxy(initialCloudBaseURL)
 	mux.Handle("/cloud-terminal-api/accounts/", proxy)
 	mux.Handle("/cloud-terminal-api/user/", proxy)
 
@@ -32,6 +39,20 @@ func (s *Server) AgentRoutes(cloudBaseURL string) http.Handler {
 		agentFiles := http.StripPrefix("/agent/", http.FileServer(http.FS(agentSubFS)))
 		mux.Handle("/agent/", agentFiles)
 	}
+
+	// Redirect the legacy /admin/ path to /agent/ so there is one canonical
+	// admin entry point on the local agent.
+	mux.HandleFunc("/admin/", func(w http.ResponseWriter, r *http.Request) {
+		target := "/agent/"
+		if rest := strings.TrimPrefix(r.URL.Path, "/admin/"); rest != "" {
+			target = "/agent/" + rest
+		}
+		if r.URL.RawQuery != "" {
+			target += "?" + r.URL.RawQuery
+		}
+		http.Redirect(w, r, target, http.StatusFound)
+	})
+
 	mux.HandleFunc("/", s.agentRoot)
 	return s.securityHeaders(mux)
 }
@@ -44,7 +65,48 @@ func (s *Server) agentRoot(w http.ResponseWriter, r *http.Request) {
 	http.FileServer(http.FS(s.staticFS)).ServeHTTP(w, r)
 }
 
-// buildCloudProxy creates a reverse proxy that forwards requests to the cloud gateway.
+// dynamicCloudProxy creates a reverse proxy that reads the live cloud URL
+// from the config store on every request, falling back to the initial value
+// captured at startup. This lets the admin UI change discovery_url /
+// gateway_url and have the next API call proxy to the new target.
+func (s *Server) dynamicCloudProxy(initial string) http.Handler {
+	initial = strings.TrimRight(strings.TrimSpace(initial), "/")
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		target := s.resolveCloudBase(initial)
+		if target == "" {
+			http.Error(w, "cloud gateway not configured — set gateway_url or discovery_url in /agent/", http.StatusServiceUnavailable)
+			return
+		}
+		parsed, err := url.Parse(target)
+		if err != nil || parsed.Host == "" {
+			http.Error(w, "invalid cloud gateway URL: "+target, http.StatusServiceUnavailable)
+			return
+		}
+		proxy := httputil.NewSingleHostReverseProxy(parsed)
+		originalDirector := proxy.Director
+		proxy.Director = func(req *http.Request) {
+			originalDirector(req)
+			req.Host = parsed.Host
+			req.Header.Del("X-Forwarded-For")
+			req.Header.Del("X-Real-IP")
+		}
+		proxy.ServeHTTP(w, r)
+	})
+}
+
+func (s *Server) resolveCloudBase(fallback string) string {
+	cfg := s.config.Snapshot()
+	if v := strings.TrimRight(strings.TrimSpace(cfg.CloudTunnel.GatewayURL), "/"); v != "" {
+		return v
+	}
+	if v := strings.TrimRight(strings.TrimSpace(cfg.CloudTunnel.DiscoveryURL), "/"); v != "" {
+		return v
+	}
+	return fallback
+}
+
+// buildCloudProxy is the simpler static-target variant; kept for tests
+// or callers that want a single fixed target.
 func buildCloudProxy(cloudBaseURL string) http.Handler {
 	cloudBaseURL = strings.TrimRight(strings.TrimSpace(cloudBaseURL), "/")
 	if cloudBaseURL == "" {
