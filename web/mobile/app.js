@@ -498,9 +498,9 @@
     workbenchView.hidden = false;
     sessions = (Array.isArray(state.sessions) ? state.sessions : []).filter((item) => !forgottenSessions.has(item.id));
     ensureSelectedAgent();
-    workspacePath.textContent = state.work_dir || "";
     reconcileSavedTargetWithState();
     currentPath = selectedTarget?.workDir || state.work_dir;
+    workspacePath.textContent = currentPath || "";
     syncFoldersFromSessions();
     renderAgentSelector();
     renderPreviewPorts();

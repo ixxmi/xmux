@@ -157,6 +157,54 @@ func TestAccountSessionAuthorizesLive(t *testing.T) {
 	}
 }
 
+func TestEdgeInfoDefaultsToAccountAllowPath(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	globalWorkDir := filepath.Join(root, "global")
+	accountWorkDir := filepath.Join(root, "account")
+	if err := os.MkdirAll(globalWorkDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(accountWorkDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	server := testServer(t, config.Config{
+		Server: config.ServerConfig{AccountRegistrationEnabled: testBoolPtr(true)},
+		Edge:   config.EdgeConfig{WorkDir: globalWorkDir},
+		Policy: policy.Config{
+			AllowPaths: []string{globalWorkDir},
+			Commands:   map[string]policy.CommandPolicy{"pwd": {Enabled: true}},
+		},
+	})
+	cookies := registerTestAccount(t, server, "user@example.com", "secret123")
+	if _, err := server.accountStore().SaveUserSettings("user@example.com", userSettingsUpdatePayload{
+		AllowPaths: []string{accountWorkDir},
+		Commands:   map[string]adminCommandPayload{"pwd": {Enabled: true}},
+	}, server.config.Snapshot().Policy); err != nil {
+		t.Fatalf("save user settings: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/cloud-terminal-api/edge", nil)
+	for _, cookie := range cookies {
+		req.AddCookie(cookie)
+	}
+	resp := httptest.NewRecorder()
+	server.Routes().ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("edge status = %d body = %s", resp.Code, resp.Body.String())
+	}
+	var payload struct {
+		WorkDir string `json:"work_dir"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode edge: %v", err)
+	}
+	if payload.WorkDir != accountWorkDir {
+		t.Fatalf("edge work_dir = %q, want %q", payload.WorkDir, accountWorkDir)
+	}
+}
+
 func TestAccountRegisterLoginAndWorkbenchState(t *testing.T) {
 	t.Parallel()
 
@@ -558,6 +606,70 @@ func TestUserSettingsPersistAndConstrainPolicy(t *testing.T) {
 	}
 	if state.WorkDir != allowedChild {
 		t.Fatalf("state work_dir = %q, want %q", state.WorkDir, allowedChild)
+	}
+}
+
+func TestWorkbenchStateFiltersSessionsOutsideAccountAllowPath(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	globalWorkDir := filepath.Join(root, "global")
+	accountWorkDir := filepath.Join(root, "account")
+	if err := os.MkdirAll(globalWorkDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(accountWorkDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	server := testServer(t, config.Config{
+		Server: config.ServerConfig{AccountRegistrationEnabled: testBoolPtr(true)},
+		Edge:   config.EdgeConfig{WorkDir: globalWorkDir},
+		Policy: policy.Config{
+			AllowPaths: []string{globalWorkDir},
+			Commands:   map[string]policy.CommandPolicy{"pwd": {Enabled: true}},
+		},
+	})
+	cookies := registerTestAccount(t, server, "user@example.com", "secret123")
+	if _, err := server.accountStore().SaveUserSettings("user@example.com", userSettingsUpdatePayload{
+		AllowPaths: []string{accountWorkDir},
+		Commands:   map[string]adminCommandPayload{"pwd": {Enabled: true}},
+	}, server.config.Snapshot().Policy); err != nil {
+		t.Fatalf("save user settings: %v", err)
+	}
+	server.workbench.sessions["outside"] = &workbenchSession{
+		id:          "outside",
+		account:     "user@example.com",
+		agent:       "codex",
+		workDir:     globalWorkDir,
+		startedAt:   time.Now(),
+		lastActive:  time.Now(),
+		attachments: map[uint64]func(workbenchServerMessage){},
+	}
+	server.workbench.sessions["inside"] = &workbenchSession{
+		id:          "inside",
+		account:     "user@example.com",
+		agent:       "codex",
+		workDir:     accountWorkDir,
+		startedAt:   time.Now(),
+		lastActive:  time.Now().Add(time.Second),
+		attachments: map[uint64]func(workbenchServerMessage){},
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/cloud-terminal-api/workbench/state", nil)
+	for _, cookie := range cookies {
+		req.AddCookie(cookie)
+	}
+	resp := httptest.NewRecorder()
+	server.Routes().ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("state status = %d body = %s", resp.Code, resp.Body.String())
+	}
+	var state workbenchStatePayload
+	if err := json.NewDecoder(resp.Body).Decode(&state); err != nil {
+		t.Fatalf("decode state: %v", err)
+	}
+	if len(state.Sessions) != 1 || state.Sessions[0].ID != "inside" {
+		t.Fatalf("sessions = %+v, want only inside session", state.Sessions)
 	}
 }
 

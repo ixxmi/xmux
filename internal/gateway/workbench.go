@@ -543,7 +543,7 @@ func resolveWorkbenchTargetWithPolicy(cfg config.Config, policyCfg policy.Config
 	return workDir, nil, nil
 }
 
-func (m *workbenchManager) list(account string) []workbenchSessionInfo {
+func (m *workbenchManager) list(account string, allowPaths []string, requirePathMatch bool) []workbenchSessionInfo {
 	account = normalizeTunnelAccount(account)
 	m.mu.RLock()
 	sessions := make([]*workbenchSession, 0, len(m.sessions))
@@ -556,6 +556,9 @@ func (m *workbenchManager) list(account string) []workbenchSessionInfo {
 	for _, session := range sessions {
 		snap := session.snapshot()
 		if account != "" && normalizeTunnelAccount(snap.Account) != account {
+			continue
+		}
+		if !workbenchSessionAllowedByPolicy(snap.WorkDir, allowPaths, requirePathMatch) {
 			continue
 		}
 		items = append(items, workbenchSessionInfo{
@@ -1198,7 +1201,7 @@ func (s *Server) workbenchStatePayload(account string) workbenchStatePayload {
 				AllowPaths:   nil,
 				PreviewPorts: nil,
 				Agents:       disabledWorkbenchAgents(),
-				Sessions:     s.workbench.list(account),
+				Sessions:     s.workbench.list(account, policyCfg.AllowPaths, policyCfg.RequirePathMatch),
 			}
 		}
 		info := client.info()
@@ -1213,7 +1216,7 @@ func (s *Server) workbenchStatePayload(account string) workbenchStatePayload {
 			AllowPaths:   allowPaths,
 			PreviewPorts: info.previewPorts,
 			Agents:       filterWorkbenchAgentsForPolicy(info.agents, policyCfg),
-			Sessions:     mergeWorkbenchSessions(s.workbench.list(account), info.sessions, account),
+			Sessions:     mergeWorkbenchSessions(s.workbench.list(account, allowPaths, policyCfg.RequirePathMatch), filterWorkbenchSessionsToPolicy(info.sessions, allowPaths, policyCfg.RequirePathMatch), account),
 		}
 	}
 	return workbenchStatePayload{
@@ -1225,7 +1228,7 @@ func (s *Server) workbenchStatePayload(account string) workbenchStatePayload {
 		AllowPaths:   slices.Clone(policyCfg.AllowPaths),
 		PreviewPorts: slices.Clone(cfg.Edge.PreviewPorts),
 		Agents:       listWorkbenchAgentsForPolicy(policyCfg),
-		Sessions:     s.workbench.list(account),
+		Sessions:     s.workbench.list(account, policyCfg.AllowPaths, policyCfg.RequirePathMatch),
 	}
 }
 
@@ -1315,6 +1318,26 @@ func mergeWorkbenchSessions(primary []workbenchSessionInfo, secondary []workbenc
 		return strings.Compare(b.LastActive, a.LastActive)
 	})
 	return merged
+}
+
+func filterWorkbenchSessionsToPolicy(sessions []workbenchSessionInfo, allowPaths []string, requirePathMatch bool) []workbenchSessionInfo {
+	if len(allowPaths) == 0 && !requirePathMatch {
+		return slices.Clone(sessions)
+	}
+	filtered := make([]workbenchSessionInfo, 0, len(sessions))
+	for _, item := range sessions {
+		if workbenchSessionAllowedByPolicy(item.WorkDir, allowPaths, requirePathMatch) {
+			filtered = append(filtered, item)
+		}
+	}
+	return filtered
+}
+
+func workbenchSessionAllowedByPolicy(workDir string, allowPaths []string, requirePathMatch bool) bool {
+	if len(allowPaths) == 0 {
+		return !requirePathMatch
+	}
+	return pathWithinAllowed(workDir, allowPaths)
 }
 
 func filterWorkbenchFileEntriesToPolicy(entries []workbenchFileEntry, allowPaths []string) []workbenchFileEntry {

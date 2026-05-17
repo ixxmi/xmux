@@ -241,11 +241,14 @@ func (s *Server) tunnelClientForAccount(account string) *tunnelClient {
 
 func (s *Server) edgeInfo(w http.ResponseWriter, r *http.Request) {
 	account, _ := s.accountFromRequest(r)
+	cfg := s.config.Snapshot()
+	policyCfg := s.policyForAccount(account, cfg.Policy)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"id":       s.edgeID,
 		"name":     s.edgeName,
 		"status":   "online",
 		"commands": s.commandCompletionsForAccount(account),
+		"work_dir": defaultWorkbenchPath(cfg.Edge.WorkDir, policyCfg.AllowPaths, policyCfg.RequirePathMatch),
 	})
 }
 

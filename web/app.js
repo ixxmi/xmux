@@ -114,6 +114,8 @@
     if (terminalFooter) {
       terminalFooter.hidden = false;
     }
+    workDir = edge?.work_dir || "";
+    updateWorkDirChip();
     setStatus("connecting", `Connecting · ${edge.name}`);
 
     if (!terminal) {
