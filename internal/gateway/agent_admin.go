@@ -40,18 +40,14 @@ func (s *Server) AgentRoutes(initialCloudBaseURL string) http.Handler {
 		mux.Handle("/agent/", agentFiles)
 	}
 
-	// Redirect the legacy /admin/ path to /agent/ so there is one canonical
-	// admin entry point on the local agent.
-	mux.HandleFunc("/admin/", func(w http.ResponseWriter, r *http.Request) {
-		target := "/agent/"
-		if rest := strings.TrimPrefix(r.URL.Path, "/admin/"); rest != "" {
-			target = "/agent/" + rest
-		}
-		if r.URL.RawQuery != "" {
-			target += "?" + r.URL.RawQuery
-		}
-		http.Redirect(w, r, target, http.StatusFound)
-	})
+	// Serve /admin/ static files (only static assets — the legacy admin
+	// HTML pages reference cloud-only endpoints that aren't registered in
+	// agent mode, so they won't function, but the shared CSS used by the
+	// /agent/ pages must still be reachable.
+	if adminSubFS, err := fs.Sub(s.staticFS, "admin"); err == nil {
+		adminFiles := http.StripPrefix("/admin/", http.FileServer(http.FS(adminSubFS)))
+		mux.Handle("/admin/", adminFiles)
+	}
 
 	mux.HandleFunc("/", s.agentRoot)
 	return s.securityHeaders(mux)
