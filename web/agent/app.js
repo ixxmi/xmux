@@ -23,6 +23,12 @@ const els = {
   workDir: document.getElementById("workDir"),
   saveTunnelButton: document.getElementById("saveTunnelButton"),
   tunnelMessage: document.getElementById("tunnelMessage"),
+  bindDot: document.getElementById("bindDot"),
+  bindStatus: document.getElementById("bindStatus"),
+  bindAccount: document.getElementById("bindAccount"),
+  bindButton: document.getElementById("bindButton"),
+  unbindButton: document.getElementById("unbindButton"),
+  bindMessage: document.getElementById("bindMessage"),
   commandList: document.getElementById("commandList"),
   enableAllCommands: document.getElementById("enableAllCommands"),
   policySummary: document.getElementById("policySummary"),
@@ -32,8 +38,10 @@ const els = {
   fileCount: document.getElementById("fileCount"),
   fileList: document.getElementById("fileList"),
   globalAllowPaths: document.getElementById("globalAllowPaths"),
-  cloudSavebar: document.getElementById("cloudSavebar"),
-  saveCloudButton: document.getElementById("saveCloudButton"),
+  saveCommandsButton: document.getElementById("saveCommandsButton"),
+  commandsMessage: document.getElementById("commandsMessage"),
+  savePathsButton: document.getElementById("savePathsButton"),
+  pathsMessage: document.getElementById("pathsMessage"),
   profileUsername: document.getElementById("profileUsername"),
   profileRole: document.getElementById("profileRole"),
   currentPassword: document.getElementById("currentPassword"),
@@ -55,15 +63,18 @@ document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeDropd
 
 els.logoutButton.addEventListener("click", logout);
 els.saveTunnelButton.addEventListener("click", saveTunnelConfig);
+els.bindButton.addEventListener("click", bindLocalClient);
+els.unbindButton.addEventListener("click", unbindLocalClient);
 els.enableAllCommands.addEventListener("click", () => {
   els.commandList.querySelectorAll("input[type='checkbox']:not(:disabled)").forEach((cb) => { cb.checked = true; });
-  markCloudDirty();
+  setCommandsMessage("有未保存的修改", "");
 });
 [els.globalAllowPaths].forEach((el) => el.addEventListener("input", () => {
   syncAllowedButtons();
-  markCloudDirty();
+  setPathsMessage("有未保存的修改", "");
 }));
-els.saveCloudButton.addEventListener("click", saveCloudSettings);
+els.saveCommandsButton.addEventListener("click", saveCommands);
+els.savePathsButton.addEventListener("click", savePaths);
 els.saveProfileButton.addEventListener("click", saveProfile);
 els.rootButton.addEventListener("click", () => loadFS("/"));
 els.upButton.addEventListener("click", () => {
@@ -103,6 +114,73 @@ function renderAgentConfig(cfg) {
   els.edgeID.value = cfg.edge_id || "";
   els.edgeName.value = cfg.edge_name || "";
   els.workDir.value = cfg.work_dir || "";
+  renderBindState(cfg);
+}
+
+function renderBindState(cfg) {
+  const bound = Boolean(cfg && cfg.bound);
+  els.bindDot.dataset.state = bound ? "bound" : "unbound";
+  els.bindStatus.textContent = bound ? "已绑定" : "未绑定";
+  els.bindAccount.textContent = bound ? `账号：${cfg.bound_account || "-"}` : "客户端进程暂时无法连接云端反向穿透";
+  els.bindButton.textContent = bound ? "重新绑定" : "绑定当前账号到本地客户端";
+  els.unbindButton.hidden = !bound;
+}
+
+async function bindLocalClient() {
+  els.bindButton.disabled = true;
+  els.unbindButton.disabled = true;
+  setBindMessage("申请云端会话...", "");
+  try {
+    const issued = await api("/cloud-terminal-api/accounts/tunnel-session", { method: "POST" });
+    const creds = await issued.json();
+    if (!creds.username || !creds.session_id) {
+      throw new Error("云端未返回有效凭证");
+    }
+    const saved = await api("/cloud-terminal-api/agent/bind", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ account: creds.username, session_id: creds.session_id })
+    });
+    state.agentConfig = await saved.json();
+    renderAgentConfig(state.agentConfig);
+    setBindMessage("已保存到本地 agent.yaml，客户端将自动重连", "ok");
+    setTimeout(() => setBindMessage("", ""), 3000);
+  } catch (error) {
+    setBindMessage(error.message || "绑定失败", "error");
+  } finally {
+    els.bindButton.disabled = false;
+    els.unbindButton.disabled = false;
+  }
+}
+
+async function unbindLocalClient() {
+  if (!confirm("解绑后客户端将断开反向穿透，确认继续？")) {
+    return;
+  }
+  els.bindButton.disabled = true;
+  els.unbindButton.disabled = true;
+  setBindMessage("解绑中...", "");
+  try {
+    const res = await api("/cloud-terminal-api/agent/bind", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ clear: true })
+    });
+    state.agentConfig = await res.json();
+    renderAgentConfig(state.agentConfig);
+    setBindMessage("已解绑", "ok");
+    setTimeout(() => setBindMessage("", ""), 2000);
+  } catch (error) {
+    setBindMessage(error.message || "解绑失败", "error");
+  } finally {
+    els.bindButton.disabled = false;
+    els.unbindButton.disabled = false;
+  }
+}
+
+function setBindMessage(text, tone) {
+  els.bindMessage.textContent = text;
+  els.bindMessage.className = "field-message" + (tone ? ` ${tone}` : "");
 }
 
 async function saveTunnelConfig() {
@@ -137,7 +215,6 @@ async function loadCloudSettings() {
     const res = await api("/cloud-terminal-api/user/settings");
     state.cloudSettings = await res.json();
     renderCloudSettings();
-    els.cloudSavebar.hidden = false;
   } catch (error) {
     els.saveState.textContent = error.message || "加载云端设置失败";
   }
@@ -156,11 +233,9 @@ function renderPolicySummary() {
   const limits = state.cloudSettings?.policy_limits || {};
   const commands = limits.commands || {};
   const enabled = Object.values(commands).filter((c) => c.enabled !== false).length;
-  const paths = Array.isArray(limits.allow_paths) ? limits.allow_paths : [];
   els.policySummary.innerHTML = `
-    <div><span>全局路径</span><strong>${paths.length}</strong></div>
     <div><span>可用命令</span><strong>${enabled}</strong></div>
-    <div><span>黑名单</span><strong>${(limits.deny || []).length}</strong></div>
+    <div><span>命令黑名单</span><strong>${(limits.deny || []).length}</strong></div>
   `;
 }
 
@@ -188,12 +263,12 @@ function renderCommands() {
         <small>${denied ? "管理员已禁用" : command.interactive ? "PTY" : "命令"}${limit.max_args ? ` · ${limit.max_args} args` : ""}</small>
       </span>
     `;
-    row.querySelector("input").addEventListener("input", markCloudDirty);
+    row.querySelector("input").addEventListener("input", () => setCommandsMessage("有未保存的修改", ""));
     els.commandList.appendChild(row);
   }
 }
 
-function collectCloudPayload() {
+function collectCommandsPayload() {
   const limits = state.cloudSettings?.policy_limits?.commands || {};
   const current = state.cloudSettings?.commands || {};
   const commands = {};
@@ -209,28 +284,56 @@ function collectCloudPayload() {
   }
   return {
     cloud_tunnel_enabled: Boolean(state.cloudSettings?.cloud_tunnel_enabled),
-    allow_paths: splitLines(els.globalAllowPaths.value),
+    allow_paths: Array.isArray(state.cloudSettings?.allow_paths) ? state.cloudSettings.allow_paths : [],
     commands
   };
 }
 
-async function saveCloudSettings() {
-  els.saveCloudButton.disabled = true;
-  els.saveState.textContent = "同步云端...";
+function collectPathsPayload() {
+  return {
+    cloud_tunnel_enabled: Boolean(state.cloudSettings?.cloud_tunnel_enabled),
+    allow_paths: splitLines(els.globalAllowPaths.value),
+    commands: state.cloudSettings?.commands || {}
+  };
+}
+
+async function saveCommands() {
+  els.saveCommandsButton.disabled = true;
+  setCommandsMessage("保存中...", "");
   try {
     const res = await api("/cloud-terminal-api/user/settings", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(collectCloudPayload())
+      body: JSON.stringify(collectCommandsPayload())
     });
     state.cloudSettings = await res.json();
     renderCloudSettings();
-    els.saveState.textContent = "已同步到云端";
-    setTimeout(() => { if (els.saveState.textContent === "已同步到云端") els.saveState.textContent = "Saved"; }, 2000);
+    setCommandsMessage("已保存", "ok");
+    setTimeout(() => setCommandsMessage("", ""), 1500);
   } catch (error) {
-    els.saveState.textContent = error.message || "同步失败";
+    setCommandsMessage(error.message || "保存失败", "error");
   } finally {
-    els.saveCloudButton.disabled = false;
+    els.saveCommandsButton.disabled = false;
+  }
+}
+
+async function savePaths() {
+  els.savePathsButton.disabled = true;
+  setPathsMessage("保存中...", "");
+  try {
+    const res = await api("/cloud-terminal-api/user/settings", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(collectPathsPayload())
+    });
+    state.cloudSettings = await res.json();
+    renderCloudSettings();
+    setPathsMessage("已保存", "ok");
+    setTimeout(() => setPathsMessage("", ""), 1500);
+  } catch (error) {
+    setPathsMessage(error.message || "保存失败", "error");
+  } finally {
+    els.savePathsButton.disabled = false;
   }
 }
 
@@ -298,7 +401,7 @@ function addAllowPath(path) {
   values.add(path);
   els.globalAllowPaths.value = lines(Array.from(values));
   syncAllowedButtons();
-  markCloudDirty();
+  setPathsMessage("有未保存的修改", "");
 }
 
 function toggleAllowPath(path) {
@@ -307,7 +410,7 @@ function toggleAllowPath(path) {
   else values.add(path);
   els.globalAllowPaths.value = lines(Array.from(values));
   syncAllowedButtons();
-  markCloudDirty();
+  setPathsMessage("有未保存的修改", "");
 }
 
 function syncAllowedButtons() {
@@ -386,13 +489,19 @@ function closeDropdown() {
   els.accountTrigger.setAttribute("aria-expanded", "false");
 }
 
-function markCloudDirty() {
-  els.saveState.textContent = "Unsaved";
-}
-
 function setTunnelMessage(text, tone) {
   els.tunnelMessage.textContent = text;
   els.tunnelMessage.className = "field-message" + (tone ? ` ${tone}` : "");
+}
+
+function setCommandsMessage(text, tone) {
+  els.commandsMessage.textContent = text;
+  els.commandsMessage.className = "field-message" + (tone ? ` ${tone}` : "");
+}
+
+function setPathsMessage(text, tone) {
+  els.pathsMessage.textContent = text;
+  els.pathsMessage.className = "field-message" + (tone ? ` ${tone}` : "");
 }
 
 function setProfileMessage(text, tone) {

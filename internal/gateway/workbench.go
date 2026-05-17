@@ -1006,6 +1006,33 @@ func (s *Server) accountMe(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// accountTunnelSession issues a fresh session for the logged-in account,
+// returned to the caller so they can persist it on the agent's local
+// config (cloud_tunnel.account / cloud_tunnel.session_id). The session is
+// independent of the web-login cookie session and survives the user
+// logging out of the admin UI.
+func (s *Server) accountTunnelSession(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", "POST")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	identity, ok := s.accountIdentityFromRequest(r)
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	session, err := s.accountStore().IssueSession(identity.Username)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{
+		"username":   identity.Username,
+		"session_id": session.SessionID,
+	})
+}
+
 func (s *Server) accountAuthResponse(account string) map[string]any {
 	return map[string]any{
 		"username":             account,

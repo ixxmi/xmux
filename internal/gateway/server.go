@@ -140,6 +140,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("/cloud-terminal-api/accounts/login", s.accountLogin)
 	mux.HandleFunc("/cloud-terminal-api/accounts/logout", s.accountLogout)
 	mux.HandleFunc("/cloud-terminal-api/accounts/me", s.accountMe)
+	mux.HandleFunc("/cloud-terminal-api/accounts/tunnel-session", s.accountTunnelSession)
 	mux.HandleFunc("/cloud-terminal-api/user/settings", s.withAccount(s.userSettings))
 	mux.HandleFunc("/cloud-terminal-api/user/fs", s.withAccount(s.userFS))
 	mux.HandleFunc("/cloud-terminal-api/workbench/auth", s.workbenchAuth)

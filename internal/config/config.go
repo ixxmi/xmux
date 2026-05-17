@@ -293,6 +293,19 @@ func (s *Store) UpdateTunnel(tunnelEnabled bool, discoveryURL, gatewayURL, edgeN
 	return s.writeConfig(next)
 }
 
+// BindTunnelAccount persists the cloud account + tunnel session ID for the
+// local agent. The agent process reads these on each reconnect to
+// authenticate against the cloud gateway. Pass an empty session_id to
+// clear the binding.
+func (s *Store) BindTunnelAccount(account, sessionID string) error {
+	s.mu.Lock()
+	next := cloneConfig(s.cfg)
+	s.mu.Unlock()
+	next.CloudTunnel.Account = strings.TrimSpace(account)
+	next.CloudTunnel.SessionID = strings.TrimSpace(sessionID)
+	return s.writeConfig(next)
+}
+
 func (s *Store) writeConfig(next Config) error {
 	content, err := yaml.Marshal(next)
 	if err != nil {

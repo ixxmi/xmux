@@ -495,16 +495,19 @@ func TestUserSettingsPersistAndConstrainPolicy(t *testing.T) {
 		t.Fatalf("settings allow_paths = %v, want %s", settings.AllowPaths, root)
 	}
 
-	invalidBody := bytes.NewBufferString(`{"allow_paths":["/definitely-outside"],"commands":{"pwd":{"enabled":true}}}`)
-	invalidReq := httptest.NewRequest(http.MethodPut, "/cloud-terminal-api/user/settings", invalidBody)
-	invalidReq.Header.Set("Content-Type", "application/json")
+	// Per-user allow_paths are not bounded by the global policy; a path
+	// outside the global roots should still be persisted (each agent has
+	// its own filesystem, so the cloud admin can't enumerate them).
+	outsidePathBody := bytes.NewBufferString(`{"allow_paths":["/definitely-outside"],"commands":{"pwd":{"enabled":true}}}`)
+	outsidePathReq := httptest.NewRequest(http.MethodPut, "/cloud-terminal-api/user/settings", outsidePathBody)
+	outsidePathReq.Header.Set("Content-Type", "application/json")
 	for _, cookie := range userCookies {
-		invalidReq.AddCookie(cookie)
+		outsidePathReq.AddCookie(cookie)
 	}
-	invalidResp := httptest.NewRecorder()
-	handler.ServeHTTP(invalidResp, invalidReq)
-	if invalidResp.Code != http.StatusBadRequest {
-		t.Fatalf("invalid settings status = %d body = %s", invalidResp.Code, invalidResp.Body.String())
+	outsidePathResp := httptest.NewRecorder()
+	handler.ServeHTTP(outsidePathResp, outsidePathReq)
+	if outsidePathResp.Code != http.StatusOK {
+		t.Fatalf("outside path should be accepted now, got status = %d body = %s", outsidePathResp.Code, outsidePathResp.Body.String())
 	}
 
 	validBody := bytes.NewBufferString(`{"cloud_tunnel_enabled":true,"allow_paths":["` + allowedChild + `"],"commands":{"pwd":{"enabled":true},"git":{"enabled":true}}}`)

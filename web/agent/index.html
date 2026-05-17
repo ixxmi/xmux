@@ -61,10 +61,37 @@
               <p id="tunnelMessage" class="field-message"></p>
             </article>
             <article class="panel">
+              <h2>账号绑定</h2>
+              <p class="muted">把当前云账号下发一张长效会话凭证，保存到本地 agent.yaml；客户端进程用它建立反向穿透连接。</p>
+              <div class="bind-state">
+                <span class="bind-dot" id="bindDot"></span>
+                <div>
+                  <strong id="bindStatus">未绑定</strong>
+                  <small id="bindAccount" class="muted"></small>
+                </div>
+              </div>
+              <div class="bind-actions">
+                <button id="bindButton" type="button">绑定当前账号到本地客户端</button>
+                <button id="unbindButton" class="secondary" type="button" hidden>解绑</button>
+              </div>
+              <p id="bindMessage" class="field-message"></p>
+            </article>
+          </div>
+          <div class="section-grid two" style="margin-top: 14px;">
+            <article class="panel">
               <h2>Edge 身份</h2>
               <label>Edge ID<input id="edgeID" placeholder="macbook-pro" /></label>
               <label>Edge 名称<input id="edgeName" placeholder="MacBook Pro" /></label>
               <label>工作目录<input id="workDir" readonly /></label>
+            </article>
+            <article class="panel">
+              <h2>说明</h2>
+              <p class="muted">
+                <strong>本地配置</strong> 仅保存在当前客户端 agent.yaml 文件里：穿透开关、Edge 身份、绑定的会话凭证。
+              </p>
+              <p class="muted">
+                <strong>云端配置</strong>（命令策略、允许路径、账号信息）在云端账号下统一管理，多客户端共享。
+              </p>
             </article>
           </div>
         </section>
@@ -80,6 +107,10 @@
                 <button id="enableAllCommands" class="secondary" type="button">全部启用</button>
               </div>
               <div id="commandList" class="command-list"></div>
+              <div class="panel-actions">
+                <button id="saveCommandsButton" type="button">保存命令策略</button>
+                <span id="commandsMessage" class="field-message"></span>
+              </div>
             </article>
             <article class="panel">
               <h2>策略边界</h2>
@@ -104,9 +135,13 @@
               <div id="fileList" class="file-list"></div>
             </article>
             <article class="panel">
-              <h2>全局可访问路径</h2>
-              <p class="muted">保存后同步到云端账号设置，用于终端、移动端文件菜单。</p>
-              <textarea id="globalAllowPaths" rows="16" spellcheck="false"></textarea>
+              <h2>允许访问路径</h2>
+              <p class="muted">每个账号在自己的客户端上独立配置；保存后云端只做记录，路径由本地客户端校验。</p>
+              <textarea id="globalAllowPaths" rows="14" spellcheck="false"></textarea>
+              <div class="panel-actions">
+                <button id="savePathsButton" type="button">保存允许路径</button>
+                <span id="pathsMessage" class="field-message"></span>
+              </div>
             </article>
           </div>
         </section>
@@ -128,10 +163,6 @@
             </article>
           </div>
         </section>
-
-        <footer class="savebar" id="cloudSavebar" hidden>
-          <button id="saveCloudButton" type="button">同步策略到云端</button>
-        </footer>
       </section>
     </main>
 

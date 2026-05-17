@@ -64,11 +64,25 @@
                 <h2>可用命令</h2>
                 <button id="enableAllCommands" class="secondary" type="button">全部启用</button>
               </div>
+              <div id="commandStats" class="command-stats"></div>
               <div id="commandList" class="command-list"></div>
             </article>
-            <article class="panel">
-              <h2>说明</h2>
-              <p>禁用后只影响你的账号。管理员全局禁用的命令不会在终端里启用，也无法由用户后台打开。</p>
+            <article class="panel command-side-panel">
+              <h2>命令边界</h2>
+              <div class="command-rule-list">
+                <div>
+                  <strong>全局上限</strong>
+                  <span>只显示管理员开放给当前账号的命令。</span>
+                </div>
+                <div>
+                  <strong>当前账号</strong>
+                  <span>关闭某个命令后，只影响你的终端会话。</span>
+                </div>
+                <div>
+                  <strong>PTY 会话</strong>
+                  <span>Codex、Claude Code、Gemini 这类命令会以长连接进程运行。</span>
+                </div>
+              </div>
             </article>
           </div>
         </section>

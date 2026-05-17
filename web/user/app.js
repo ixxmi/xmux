@@ -14,6 +14,7 @@ const els = {
   logoutButton: document.getElementById("logoutButton"),
   cloudTunnelEnabled: document.getElementById("cloudTunnelEnabled"),
   policySummary: document.getElementById("policySummary"),
+  commandStats: document.getElementById("commandStats"),
   commandList: document.getElementById("commandList"),
   enableAllCommands: document.getElementById("enableAllCommands"),
   rootsButton: document.getElementById("rootsButton"),
@@ -102,6 +103,20 @@ function renderCommands() {
   const limits = state.settings?.policy_limits?.commands || {};
   const commands = state.settings?.commands || {};
   const names = Object.keys(limits).sort();
+  const denied = state.settings?.policy_limits?.deny || [];
+  const enabledCount = names.filter((name) => {
+    const limit = limits[name] || {};
+    const command = commands[name] || limit;
+    const disabledByAdmin = limit.enabled === false || denied.includes(name);
+    return !disabledByAdmin && command.enabled;
+  }).length;
+  const interactiveCount = names.filter((name) => limits[name]?.interactive).length;
+  const adminDisabledCount = names.filter((name) => limits[name]?.enabled === false || denied.includes(name)).length;
+  els.commandStats.innerHTML = `
+    <div><span>已启用</span><strong>${enabledCount}</strong></div>
+    <div><span>PTY</span><strong>${interactiveCount}</strong></div>
+    <div><span>受限</span><strong>${adminDisabledCount}</strong></div>
+  `;
   if (names.length === 0) {
     els.commandList.innerHTML = '<div class="empty-state">管理员未配置可用命令。</div>';
     return;
@@ -109,17 +124,33 @@ function renderCommands() {
   for (const name of names) {
     const limit = limits[name] || {};
     const command = commands[name] || limit;
-    const disabledByAdmin = limit.enabled === false || (state.settings?.policy_limits?.deny || []).includes(name);
+    const disabledByAdmin = limit.enabled === false || denied.includes(name);
+    const enabled = Boolean(command.enabled && !disabledByAdmin);
+    const typeLabel = command.interactive ? "PTY" : "命令";
+    const statusLabel = disabledByAdmin ? "全局禁用" : enabled ? "已启用" : "已关闭";
     const row = document.createElement("label");
-    row.className = "command-row";
+    row.className = `command-row ${enabled ? "enabled" : "disabled"} ${disabledByAdmin ? "admin-disabled" : ""}`;
     row.innerHTML = `
-      <input type="checkbox" data-command="${escapeAttr(name)}" ${command.enabled && !disabledByAdmin ? "checked" : ""} ${disabledByAdmin ? "disabled" : ""} />
-      <span>
-        <strong>${escapeHTML(name)}</strong>
-        <small>${disabledByAdmin ? "管理员已禁用" : command.interactive ? "PTY" : "命令"}${limit.max_args ? ` · ${limit.max_args} args` : ""}</small>
+      <span class="command-switch">
+        <input type="checkbox" data-command="${escapeAttr(name)}" ${enabled ? "checked" : ""} ${disabledByAdmin ? "disabled" : ""} />
+        <span aria-hidden="true"></span>
       </span>
+      <span class="command-main">
+        <strong>${escapeHTML(name)}</strong>
+        <small>${typeLabel}${limit.max_args ? ` · ${limit.max_args} args` : ""}</small>
+      </span>
+      <span class="command-status">${statusLabel}</span>
     `;
-    row.querySelector("input").addEventListener("input", markDirty);
+    row.querySelector("input").addEventListener("input", (event) => {
+      row.classList.toggle("enabled", event.target.checked);
+      row.classList.toggle("disabled", !event.target.checked);
+      const status = row.querySelector(".command-status");
+      if (status && !disabledByAdmin) {
+        status.textContent = event.target.checked ? "已启用" : "已关闭";
+      }
+      renderCommandStatsOnly();
+      markDirty();
+    });
     els.commandList.appendChild(row);
   }
 }
@@ -127,8 +158,30 @@ function renderCommands() {
 function enableAllCommands() {
   els.commandList.querySelectorAll("input[type='checkbox']:not(:disabled)").forEach((input) => {
     input.checked = true;
+    input.closest(".command-row")?.classList.add("enabled");
+    input.closest(".command-row")?.classList.remove("disabled");
+    const status = input.closest(".command-row")?.querySelector(".command-status");
+    if (status) {
+      status.textContent = "已启用";
+    }
   });
+  renderCommandStatsOnly();
   markDirty();
+}
+
+function renderCommandStatsOnly() {
+  const rows = Array.from(els.commandList.querySelectorAll(".command-row"));
+  if (rows.length === 0) {
+    return;
+  }
+  const enabledCount = rows.filter((row) => row.querySelector("input")?.checked && !row.classList.contains("admin-disabled")).length;
+  const interactiveCount = rows.filter((row) => row.querySelector(".command-main small")?.textContent.includes("PTY")).length;
+  const adminDisabledCount = rows.filter((row) => row.classList.contains("admin-disabled")).length;
+  els.commandStats.innerHTML = `
+    <div><span>已启用</span><strong>${enabledCount}</strong></div>
+    <div><span>PTY</span><strong>${interactiveCount}</strong></div>
+    <div><span>受限</span><strong>${adminDisabledCount}</strong></div>
+  `;
 }
 
 function collectCommands() {

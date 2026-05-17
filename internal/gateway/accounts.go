@@ -1112,11 +1112,9 @@ func userSettingsFromPayload(username string, payload userSettingsUpdatePayload,
 		Commands:           make(map[string]policy.CommandPolicy),
 		AllowPaths:         cleanPaths(payload.AllowPaths),
 	}
-	for _, path := range settings.AllowPaths {
-		if !pathWithinAllowed(path, global.AllowPaths) {
-			return userSettings{}, fmt.Errorf("path %s is outside global allowed roots", path)
-		}
-	}
+	// Per-user allow_paths are independent across agents — each client has
+	// its own filesystem, so the cloud admin's global list cannot bound
+	// what each user is allowed to see locally.
 	denied := make(map[string]struct{}, len(global.Deny))
 	for _, command := range global.Deny {
 		command = strings.TrimSpace(command)
@@ -1144,7 +1142,7 @@ func userSettingsFromPayload(username string, payload userSettingsUpdatePayload,
 			Bin:         globalRule.Bin,
 			Interactive: incoming.Interactive && globalRule.Interactive,
 			Subcommands: intersectStrings(cleanList(incoming.Subcommands), globalRule.Subcommands),
-			AllowPaths:  filterAllowedPaths(cleanPaths(incoming.AllowPaths), global.AllowPaths),
+			AllowPaths:  cleanPaths(incoming.AllowPaths),
 			MaxArgs:     incoming.MaxArgs,
 		}
 		if globalRule.MaxArgs > 0 && (rule.MaxArgs <= 0 || rule.MaxArgs > globalRule.MaxArgs) {
@@ -1164,7 +1162,7 @@ func userSettingsFromPayload(username string, payload userSettingsUpdatePayload,
 func policyFromUserSettings(settings userSettings, global policy.Config) (policy.Config, error) {
 	next := policy.Config{
 		Deny:       slices.Clone(global.Deny),
-		AllowPaths: filterAllowedPaths(settings.AllowPaths, global.AllowPaths),
+		AllowPaths: slices.Clone(settings.AllowPaths),
 		Commands:   make(map[string]policy.CommandPolicy),
 	}
 	if len(next.AllowPaths) == 0 {
@@ -1192,7 +1190,7 @@ func policyFromUserSettings(settings userSettings, global policy.Config) (policy
 		if len(globalRule.Subcommands) == 0 {
 			rule.Subcommands = nil
 		}
-		rule.AllowPaths = filterAllowedPaths(userRule.AllowPaths, global.AllowPaths)
+		rule.AllowPaths = slices.Clone(userRule.AllowPaths)
 		if globalRule.MaxArgs > 0 && (userRule.MaxArgs <= 0 || userRule.MaxArgs > globalRule.MaxArgs) {
 			rule.MaxArgs = globalRule.MaxArgs
 		} else {

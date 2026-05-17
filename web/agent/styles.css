@@ -1,25 +1,16 @@
 /* Agent admin uses the same design language as admin */
 @import url("/admin/styles.css");
 
-/* Savebar at bottom of content */
+/* The page-level cloudSavebar was removed in favor of per-section saves;
+ * keep stub for backward compatibility if html re-introduces it later. */
 .savebar {
-  position: sticky;
-  bottom: 0;
-  display: flex;
-  justify-content: flex-end;
-  padding: 12px 0 0;
-  background: transparent;
-}
-
-.savebar button {
-  min-width: 160px;
-  box-shadow: 0 10px 24px rgba(173, 98, 56, 0.22);
+  display: none;
 }
 
 /* Summary grid */
 .summary-grid {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(2, 1fr);
   gap: 10px;
 }
 
@@ -43,6 +34,66 @@
 .summary-grid strong {
   color: var(--text);
   font-size: 22px;
+}
+
+/* Per-panel save actions */
+.panel-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  padding-top: 6px;
+}
+
+.panel-actions .field-message {
+  margin-right: auto;
+}
+
+/* Bind state widget */
+.bind-state {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--line-soft);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.bind-state strong {
+  display: block;
+  font-size: 14px;
+  font-weight: 800;
+}
+
+.bind-state small {
+  display: block;
+  font-size: 12px;
+  margin-top: 2px;
+  color: var(--muted);
+}
+
+.bind-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 999px;
+  background: var(--danger);
+  box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.08);
+}
+
+.bind-dot[data-state="bound"] {
+  background: #4ec07a;
+}
+
+.bind-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.bind-actions button {
+  min-width: 0;
 }
 
 /* Command list */

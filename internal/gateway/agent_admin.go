@@ -27,6 +27,7 @@ func (s *Server) AgentRoutes(initialCloudBaseURL string) http.Handler {
 
 	// Local-only endpoints
 	mux.HandleFunc("/cloud-terminal-api/agent/config", s.agentConfig)
+	mux.HandleFunc("/cloud-terminal-api/agent/bind", s.agentBind)
 	mux.HandleFunc("/cloud-terminal-api/admin/fs", s.agentLocalFS)
 
 	// Proxy auth + user settings to cloud
@@ -135,20 +136,14 @@ type agentConfigPayload struct {
 	EdgeID        string `json:"edge_id,omitempty"`
 	EdgeName      string `json:"edge_name,omitempty"`
 	WorkDir       string `json:"work_dir,omitempty"`
+	BoundAccount  string `json:"bound_account,omitempty"`
+	Bound         bool   `json:"bound"`
 }
 
 func (s *Server) agentConfig(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		cfg := s.config.Snapshot()
-		writeJSON(w, http.StatusOK, agentConfigPayload{
-			TunnelEnabled: cfg.CloudTunnel.Enabled,
-			DiscoveryURL:  cfg.CloudTunnel.DiscoveryURL,
-			GatewayURL:    cfg.CloudTunnel.GatewayURL,
-			EdgeID:        cfg.Edge.ID,
-			EdgeName:      cfg.Edge.Name,
-			WorkDir:       cfg.Edge.WorkDir,
-		})
+		writeJSON(w, http.StatusOK, s.snapshotAgentConfig())
 	case http.MethodPut:
 		var payload agentConfigPayload
 		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
@@ -165,19 +160,70 @@ func (s *Server) agentConfig(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		cfg := s.config.Snapshot()
-		writeJSON(w, http.StatusOK, agentConfigPayload{
-			TunnelEnabled: cfg.CloudTunnel.Enabled,
-			DiscoveryURL:  cfg.CloudTunnel.DiscoveryURL,
-			GatewayURL:    cfg.CloudTunnel.GatewayURL,
-			EdgeID:        cfg.Edge.ID,
-			EdgeName:      cfg.Edge.Name,
-			WorkDir:       cfg.Edge.WorkDir,
-		})
+		writeJSON(w, http.StatusOK, s.snapshotAgentConfig())
 	default:
 		w.Header().Set("Allow", "GET, PUT")
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+func (s *Server) snapshotAgentConfig() agentConfigPayload {
+	cfg := s.config.Snapshot()
+	return agentConfigPayload{
+		TunnelEnabled: cfg.CloudTunnel.Enabled,
+		DiscoveryURL:  cfg.CloudTunnel.DiscoveryURL,
+		GatewayURL:    cfg.CloudTunnel.GatewayURL,
+		EdgeID:        cfg.Edge.ID,
+		EdgeName:      cfg.Edge.Name,
+		WorkDir:       cfg.Edge.WorkDir,
+		BoundAccount:  cfg.CloudTunnel.Account,
+		Bound:         strings.TrimSpace(cfg.CloudTunnel.Account) != "" && strings.TrimSpace(cfg.CloudTunnel.SessionID) != "",
+	}
+}
+
+type agentBindPayload struct {
+	Account   string `json:"account"`
+	SessionID string `json:"session_id"`
+	Clear     bool   `json:"clear,omitempty"`
+}
+
+// agentBind persists the cloud tunnel credentials to the local agent.yaml.
+// Typical flow from the browser:
+//
+//  1. POST /cloud-terminal-api/accounts/tunnel-session (proxied → cloud)
+//     returns {username, session_id}
+//  2. POST /cloud-terminal-api/agent/bind with that payload (handled here)
+//     saves {Account, SessionID} into cloud_tunnel.* on local YAML.
+//
+// Set Clear=true to wipe the binding instead.
+func (s *Server) agentBind(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", "POST")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var payload agentBindPayload
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if payload.Clear {
+		if err := s.config.BindTunnelAccount("", ""); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusOK, s.snapshotAgentConfig())
+		return
+	}
+	if strings.TrimSpace(payload.Account) == "" || strings.TrimSpace(payload.SessionID) == "" {
+		http.Error(w, "account and session_id are required", http.StatusBadRequest)
+		return
+	}
+	if err := s.config.BindTunnelAccount(payload.Account, payload.SessionID); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, s.snapshotAgentConfig())
 }
 
 // agentLocalFS serves the local filesystem without cloud auth —
