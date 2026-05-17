@@ -230,10 +230,109 @@ func TestTunnelWorkbenchStateIsFilteredByUserPolicy(t *testing.T) {
 	if len(state.AllowPaths) != 1 || state.AllowPaths[0] != allowed {
 		t.Fatalf("AllowPaths = %v, want %s", state.AllowPaths, allowed)
 	}
+	if len(state.EdgePaths) != 1 || state.EdgePaths[0] != allowed {
+		t.Fatalf("EdgePaths = %v, want %s", state.EdgePaths, allowed)
+	}
 	for _, agent := range state.Agents {
 		if agent.ID == "claude" && agent.Enabled {
 			t.Fatalf("claude should be disabled by user policy: %+v", state.Agents)
 		}
+	}
+}
+
+func TestTunnelWorkbenchStateShowsAccountPathsEvenBeforeAgentPolicySync(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	accountPath := filepath.Join(root, "account")
+	agentPath := filepath.Join(root, "agent")
+	if err := os.MkdirAll(accountPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(agentPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	server := NewServer(Options{
+		Config: config.NewStore(filepath.Join(t.TempDir(), "policy.yaml"), &config.Config{
+			Server: config.ServerConfig{
+				DatabasePath:               filepath.Join(t.TempDir(), "xmux.db"),
+				AccountRegistrationEnabled: testBoolPtr(true),
+			},
+			Policy: policy.Config{
+				AllowPaths: []string{root},
+				Commands:   map[string]policy.CommandPolicy{"codex": {Enabled: true, Interactive: true}},
+			},
+		}),
+	})
+	registerTestAccount(t, server, "user@example.com", "secret123")
+	if _, err := server.accountStore().SaveUserSettings("user@example.com", userSettingsUpdatePayload{
+		CloudTunnelEnabled: true,
+		AllowPaths:         []string{accountPath},
+		Commands:           map[string]adminCommandPayload{"codex": {Enabled: true, Interactive: true}},
+	}, server.config.Snapshot().Policy); err != nil {
+		t.Fatalf("save user settings: %v", err)
+	}
+	server.tunnel.set(&tunnelClient{
+		hub:        server.tunnel,
+		account:    "user@example.com",
+		edgeID:     "edge-user",
+		edgeName:   "User Edge",
+		workDir:    agentPath,
+		allowPaths: []string{agentPath},
+		agents:     []workbenchAgentInfo{{ID: "codex", Label: "Codex", Command: "codex", Enabled: true}},
+		pending:    make(map[string]chan tunnelEnvelope),
+	})
+
+	state := server.workbenchStatePayload("user@example.com")
+	if len(state.AllowPaths) != 1 || state.AllowPaths[0] != accountPath {
+		t.Fatalf("AllowPaths = %v, want account path %s", state.AllowPaths, accountPath)
+	}
+	if len(state.EdgePaths) != 0 {
+		t.Fatalf("EdgePaths = %v, want empty until local agent syncs account path", state.EdgePaths)
+	}
+	if state.WorkDir != "" {
+		t.Fatalf("WorkDir = %q, want empty until local agent syncs account path", state.WorkDir)
+	}
+}
+
+func TestTunnelWorkbenchStateShowsAccountPathsWhenAgentOffline(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	accountPath := filepath.Join(root, "account")
+	if err := os.MkdirAll(accountPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	server := NewServer(Options{
+		Config: config.NewStore(filepath.Join(t.TempDir(), "policy.yaml"), &config.Config{
+			Server: config.ServerConfig{
+				DatabasePath:               filepath.Join(t.TempDir(), "xmux.db"),
+				AccountRegistrationEnabled: testBoolPtr(true),
+			},
+			Policy: policy.Config{
+				AllowPaths: []string{root},
+				Commands:   map[string]policy.CommandPolicy{"codex": {Enabled: true, Interactive: true}},
+			},
+		}),
+	})
+	registerTestAccount(t, server, "user@example.com", "secret123")
+	if _, err := server.accountStore().SaveUserSettings("user@example.com", userSettingsUpdatePayload{
+		CloudTunnelEnabled: true,
+		AllowPaths:         []string{accountPath},
+		Commands:           map[string]adminCommandPayload{"codex": {Enabled: true, Interactive: true}},
+	}, server.config.Snapshot().Policy); err != nil {
+		t.Fatalf("save user settings: %v", err)
+	}
+
+	state := server.workbenchStatePayload("user@example.com")
+	if state.EdgeOnline {
+		t.Fatal("EdgeOnline = true, want false")
+	}
+	if len(state.AllowPaths) != 1 || state.AllowPaths[0] != accountPath {
+		t.Fatalf("AllowPaths = %v, want account path %s", state.AllowPaths, accountPath)
+	}
+	if len(state.EdgePaths) != 0 {
+		t.Fatalf("EdgePaths = %v, want empty while agent is offline", state.EdgePaths)
 	}
 }
 

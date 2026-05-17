@@ -921,7 +921,7 @@
       return;
     }
     for (const root of roots) {
-      folderPickerList.appendChild(folderPickerRow(root, true));
+      folderPickerList.appendChild(folderPickerRow(root, true, !pathAvailableOnEdge(root)));
     }
   }
 
@@ -957,7 +957,7 @@
     processList.hidden = false;
   }
 
-  function folderPickerRow(path, current) {
+  function folderPickerRow(path, current, unavailable = false) {
     const row = document.createElement("div");
     row.className = "folder-picker-row";
     row.title = path;
@@ -965,15 +965,17 @@
       <span class="folder-icon">${folderIcon()}</span>
       <span class="folder-name">${escapeHTML(current ? baseName(path) || path : baseName(path))}</span>
       <span class="folder-row-actions">
-        <button class="folder-enter" type="button" title="进入" aria-label="进入">${chevronRightIcon()}</button>
-        <button class="folder-add" type="button" title="添加" aria-label="添加">${plusIcon()}</button>
+        ${unavailable ? '<span class="folder-sync">等待同步</span>' : `<button class="folder-enter" type="button" title="进入" aria-label="进入">${chevronRightIcon()}</button><button class="folder-add" type="button" title="添加" aria-label="添加">${plusIcon()}</button>`}
       </span>
     `;
-    row.querySelector(".folder-enter").addEventListener("click", (event) => {
+    if (unavailable) {
+      return row;
+    }
+    row.querySelector(".folder-enter")?.addEventListener("click", (event) => {
       event.stopPropagation();
       loadFolderPicker(path);
     });
-    row.querySelector(".folder-add").addEventListener("click", (event) => {
+    row.querySelector(".folder-add")?.addEventListener("click", (event) => {
       event.stopPropagation();
       addProcessFolder(path, true, true);
       closeFolderPicker();
@@ -1021,7 +1023,8 @@
         name: root,
         path: root,
         is_dir: true,
-        size: 0
+        size: 0,
+        unavailable: !pathAvailableOnEdge(root)
       }, false));
     }
   }
@@ -1035,11 +1038,15 @@
       <span class="file-icon">${entry.is_dir ? folderIcon() : fileIcon()}</span>
       <span class="file-name">${escapeHTML(currentDir ? "当前目录" : entry.name)}</span>
       <span class="file-actions">
-        ${entry.is_dir && !currentDir ? '<span class="open-dir">进入</span>' : ""}
-        <span class="choose-label">${isSelected ? "已选择" : "启动"}</span>
+        ${entry.unavailable ? '<span class="choose-label">等待同步</span>' : entry.is_dir && !currentDir ? '<span class="open-dir">进入</span>' : ""}
+        <span class="choose-label">${entry.unavailable ? "不可用" : isSelected ? "已选择" : "启动"}</span>
       </span>
     `;
     button.addEventListener("click", (event) => {
+      if (entry.unavailable) {
+        targetSelection.textContent = "该路径已保存到云端，等待本地客户端同步后可使用";
+        return;
+      }
       const action = event.target.closest(".open-dir");
       if (action && entry.is_dir) {
         loadTargetFiles(entry.path);
@@ -1080,6 +1087,11 @@
     }
     if (!selectedTarget.workDir) {
       targetSelection.textContent = "请先在用户后台配置允许访问路径";
+      startAgentButton.disabled = true;
+      return;
+    }
+    if (!pathAvailableOnEdge(selectedTarget.workDir)) {
+      targetSelection.textContent = "该路径已保存到云端，等待本地客户端同步后可使用";
       startAgentButton.disabled = true;
       return;
     }
@@ -1791,9 +1803,14 @@
       button.innerHTML = `
         <span class="file-icon">${folderIcon()}</span>
         <span class="file-name">${escapeHTML(shortenPath(root))}</span>
-        <span class="file-meta">Root</span>
+        <span class="file-meta">${pathAvailableOnEdge(root) ? "Root" : "等待同步"}</span>
       `;
-      button.addEventListener("click", () => loadFiles(root));
+      button.disabled = !pathAvailableOnEdge(root);
+      button.addEventListener("click", () => {
+        if (pathAvailableOnEdge(root)) {
+          loadFiles(root);
+        }
+      });
       fileList.appendChild(button);
     }
   }
@@ -2278,6 +2295,26 @@
   function pathAllowedByState(path) {
     path = String(path || "");
     const roots = Array.isArray(state?.allow_paths) ? state.allow_paths : [];
+    return roots.some((root) => {
+      root = String(root || "");
+      if (!root) {
+        return false;
+      }
+      const normalized = root.replace(/\/+$/, "") || "/";
+      return path === root || path === normalized || (normalized !== "/" && path.startsWith(normalized + "/"));
+    });
+  }
+
+  function pathAvailableOnEdge(path) {
+    const roots = Array.isArray(state?.edge_allow_paths) ? state.edge_allow_paths : state?.allow_paths;
+    return pathAllowedByRoots(path, roots);
+  }
+
+  function pathAllowedByRoots(path, roots) {
+    path = String(path || "");
+    if (!Array.isArray(roots)) {
+      return false;
+    }
     return roots.some((root) => {
       root = String(root || "");
       if (!root) {

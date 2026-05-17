@@ -170,6 +170,7 @@ type workbenchStatePayload struct {
 	Tunnel       bool                   `json:"tunnel"`
 	WorkDir      string                 `json:"work_dir"`
 	AllowPaths   []string               `json:"allow_paths"`
+	EdgePaths    []string               `json:"edge_allow_paths,omitempty"`
 	PreviewPorts []int                  `json:"preview_ports"`
 	Agents       []workbenchAgentInfo   `json:"agents"`
 	Sessions     []workbenchSessionInfo `json:"sessions"`
@@ -1198,25 +1199,26 @@ func (s *Server) workbenchStatePayload(account string) workbenchStatePayload {
 				EdgeOnline:   false,
 				Tunnel:       true,
 				WorkDir:      "",
-				AllowPaths:   nil,
+				AllowPaths:   slices.Clone(policyCfg.AllowPaths),
 				PreviewPorts: nil,
 				Agents:       disabledWorkbenchAgents(),
 				Sessions:     s.workbench.list(account, policyCfg.AllowPaths, policyCfg.RequirePathMatch),
 			}
 		}
 		info := client.info()
-		allowPaths := filterAllowedPaths(policyCfg.AllowPaths, info.allowPaths)
-		workDir := defaultWorkbenchPath(info.workDir, allowPaths, policyCfg.RequirePathMatch)
+		edgePaths := filterAllowedPaths(policyCfg.AllowPaths, info.allowPaths)
+		workDir := defaultWorkbenchPath(info.workDir, edgePaths, policyCfg.RequirePathMatch)
 		return workbenchStatePayload{
 			EdgeID:       info.edgeID,
 			EdgeName:     info.edgeName,
 			EdgeOnline:   true,
 			Tunnel:       true,
 			WorkDir:      workDir,
-			AllowPaths:   allowPaths,
+			AllowPaths:   slices.Clone(policyCfg.AllowPaths),
+			EdgePaths:    edgePaths,
 			PreviewPorts: info.previewPorts,
 			Agents:       filterWorkbenchAgentsForPolicy(info.agents, policyCfg),
-			Sessions:     mergeWorkbenchSessions(s.workbench.list(account, allowPaths, policyCfg.RequirePathMatch), filterWorkbenchSessionsToPolicy(info.sessions, allowPaths, policyCfg.RequirePathMatch), account),
+			Sessions:     mergeWorkbenchSessions(s.workbench.list(account, edgePaths, policyCfg.RequirePathMatch), filterWorkbenchSessionsToPolicy(info.sessions, edgePaths, policyCfg.RequirePathMatch), account),
 		}
 	}
 	return workbenchStatePayload{
