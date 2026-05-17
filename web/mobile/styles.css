@@ -697,11 +697,28 @@ button.danger-action {
 
 .folder-picker-head {
   display: grid;
-  grid-template-columns: 32px minmax(0, 1fr);
+  grid-template-columns: 32px minmax(0, 1fr) auto;
   align-items: center;
   gap: 8px;
   border-bottom: 1px solid var(--line-soft);
   padding-bottom: 9px;
+}
+
+.folder-cancel {
+  min-height: 30px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.folder-cancel:hover {
+  background: rgba(255, 116, 107, 0.14);
+  color: var(--danger);
 }
 
 .folder-picker-head strong {
@@ -1331,6 +1348,35 @@ button.danger-action {
   gap: 6px;
 }
 
+.file-list.compact {
+  gap: 4px;
+}
+
+.file-list.compact .file-row {
+  min-height: 38px;
+  padding: 0 10px;
+  grid-template-columns: 22px minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
+.file-list.compact .file-icon {
+  width: 20px;
+  height: 20px;
+}
+
+.file-list.compact .file-icon svg {
+  width: 20px;
+  height: 20px;
+}
+
+.file-list.compact .file-name {
+  font-size: 13px;
+}
+
+.file-list.compact .file-meta {
+  font-size: 11px;
+}
+
 .file-row {
   width: 100%;
   min-height: 48px;
@@ -1530,6 +1576,136 @@ button.danger-action {
 .settings-field {
   display: grid;
   gap: 6px;
+}
+
+.password-form {
+  display: grid;
+  gap: 12px;
+  padding: 12px;
+  border: 1px dashed rgba(0, 0, 0, 0.18);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.03);
+}
+
+.password-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.archive-panel {
+  display: grid;
+  gap: 12px;
+  padding: 12px;
+  border: 1px dashed rgba(0, 0, 0, 0.18);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.03);
+}
+
+.archive-group {
+  display: grid;
+  gap: 6px;
+}
+
+.archive-label {
+  color: #4f4f4f;
+  font-family: figmaMono, "SF Mono", Menlo, monospace;
+  font-size: 11px;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+}
+
+.archive-list {
+  display: grid;
+  gap: 6px;
+}
+
+.archive-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid #000000;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.archive-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.archive-actions button {
+  min-height: 30px;
+  padding: 0 10px;
+  font-size: 12px;
+}
+
+.archive-actions .archive-delete {
+  color: var(--danger);
+  border-color: rgba(255, 116, 107, 0.5);
+}
+
+.session-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.session-name {
+  overflow: hidden;
+  max-width: 200px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-name-input {
+  flex: 1;
+  min-width: 0;
+  max-width: 220px;
+  height: 26px;
+  padding: 0 8px;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  background: #ffffff;
+  color: #000000;
+  font-size: 13px;
+  outline: none;
+}
+
+.process-rename {
+  background: transparent;
+  border-color: transparent;
+  color: var(--muted);
+}
+
+.process-rename:hover {
+  color: var(--accent);
+}
+
+.archive-name {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 13px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.archive-empty {
+  color: #4f4f4f;
+  font-size: 12px;
+  padding: 4px 2px;
+}
+
+.settings-message.error {
+  color: var(--danger);
+}
+
+.settings-message.ok {
+  color: var(--accent);
 }
 
 .settings-field input {

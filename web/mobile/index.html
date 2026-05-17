@@ -66,7 +66,7 @@
               <span>进程与文件夹</span>
               <strong id="processSummary">0 running</strong>
             </div>
-            <button id="addFolderButton" class="tool-icon-button" type="button" aria-label="Choose folder" title="选择文件夹">
+            <button id="addFolderButton" class="tool-icon-button" type="button" aria-label="Choose folder" title="添加文件夹">
               <svg viewBox="0 0 24 24" aria-hidden="true">
                 <path d="M3 7a2 2 0 0 1 2-2h4.4l2 2H19a2 2 0 0 1 2 2v7.5a2.5 2.5 0 0 1-2.5 2.5h-13A2.5 2.5 0 0 1 3 16.5V7Z"></path>
                 <path d="M12 11v5M9.5 13.5h5"></path>
@@ -75,12 +75,13 @@
           </div>
           <div id="folderPicker" class="folder-picker" hidden>
             <div class="folder-picker-head">
-              <button id="folderBackButton" class="tool-icon-button" type="button" aria-label="Back" title="返回">
+              <button id="folderBackButton" class="tool-icon-button" type="button" aria-label="Back" title="返回上一级">
                 <svg viewBox="0 0 24 24" aria-hidden="true">
                   <path d="m15 18-6-6 6-6"></path>
                 </svg>
               </button>
               <strong id="folderPickerPath">选择目录</strong>
+              <button id="folderCancelButton" class="folder-cancel" type="button">取消</button>
             </div>
             <div id="folderPickerList" class="folder-picker-list"></div>
           </div>
@@ -136,10 +137,11 @@
         <section class="tab-page" data-page="files">
           <div class="file-toolbar">
             <button id="parentButton" class="ghost" type="button">Up</button>
+            <button id="rootsButton" class="ghost" type="button">Roots</button>
             <button id="refreshFilesButton" class="ghost" type="button">Refresh</button>
           </div>
-          <div id="currentPath" class="current-path"></div>
-          <div id="fileList" class="file-list"></div>
+          <div id="currentPath" class="current-path" title=""></div>
+          <div id="fileList" class="file-list compact"></div>
           <article id="fileViewer" class="file-viewer" hidden>
             <div class="viewer-head">
               <strong id="viewerTitle">File</strong>
@@ -184,12 +186,41 @@
                   <span>账号信息</span>
                   <strong>修改当前账号密码</strong>
                 </div>
+                <button id="togglePasswordButton" class="ghost" type="button">修改密码</button>
               </div>
-              <label class="settings-field">当前密码<input id="currentPasswordInput" type="password" autocomplete="current-password" /></label>
-              <label class="settings-field">新密码<input id="newPasswordInput" type="password" autocomplete="new-password" placeholder="至少 8 位" /></label>
-              <p id="profileMessage" class="settings-message"></p>
-              <button id="saveProfileButton" type="button">保存账号信息</button>
+              <div id="passwordForm" class="password-form" hidden>
+                <label class="settings-field">当前密码<input id="currentPasswordInput" type="password" autocomplete="current-password" /></label>
+                <label class="settings-field">新密码<input id="newPasswordInput" type="password" autocomplete="new-password" placeholder="至少 8 位" /></label>
+                <p id="profileMessage" class="settings-message"></p>
+                <div class="password-actions">
+                  <button id="cancelProfileButton" class="ghost" type="button">取消</button>
+                  <button id="saveProfileButton" type="button">保存密码</button>
+                </div>
+              </div>
               <a class="settings-console-link" href="/user/">进入用户后台管理穿透、命令和路径</a>
+            </section>
+
+            <section class="settings-block">
+              <div class="settings-head">
+                <div>
+                  <span>归档</span>
+                  <strong>已归档的文件夹与终端</strong>
+                </div>
+                <button id="toggleArchiveButton" class="ghost" type="button">已归档 <span id="archiveCount">0</span></button>
+              </div>
+              <div id="archivePanel" class="archive-panel" hidden>
+                <div class="archive-group">
+                  <span class="archive-label">文件夹</span>
+                  <div id="archivedFoldersList" class="archive-list"></div>
+                </div>
+                <div class="archive-group">
+                  <span class="archive-label">终端会话</span>
+                  <div id="archivedSessionsList" class="archive-list"></div>
+                </div>
+                <div class="password-actions">
+                  <button id="closeArchiveButton" class="ghost" type="button">关闭</button>
+                </div>
+              </div>
             </section>
           </div>
         </section>

@@ -106,6 +106,10 @@ func (a *Agent) Run(ctx context.Context) error {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
+			if errors.Is(err, errAlreadyConnected) {
+				a.logger.Warn("agent tunnel rejected: another agent for the same account is already connected; stopping reconnect loop", "error", err)
+				return err
+			}
 			a.logger.Warn("agent tunnel disconnected", "error", err)
 		}
 		select {
@@ -115,6 +119,8 @@ func (a *Agent) Run(ctx context.Context) error {
 		}
 	}
 }
+
+var errAlreadyConnected = errors.New("agent already connected for this account")
 
 func (a *Agent) runOnce(ctx context.Context) error {
 	username, sessionID, discoveryURL, gatewayURL := a.tunnelInputs()
@@ -154,6 +160,9 @@ func (a *Agent) runOnce(ctx context.Context) error {
 			break
 		}
 		if env.Type == "error" {
+			if env.Code == "already_connected" {
+				return fmt.Errorf("%w: %s", errAlreadyConnected, env.Error)
+			}
 			return errors.New(env.Error)
 		}
 	}

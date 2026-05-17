@@ -5,6 +5,9 @@
   const FOLDER_SESSION_KEY = "cloud-terminal-mobile-folder-sessions";
   const ARCHIVED_FOLDER_KEY = "cloud-terminal-mobile-archived-folders";
   const ARCHIVED_SESSION_KEY = "cloud-terminal-mobile-archived-sessions";
+  const FORGOTTEN_FOLDER_KEY = "cloud-terminal-mobile-forgotten-folders";
+  const FORGOTTEN_SESSION_KEY = "cloud-terminal-mobile-forgotten-sessions";
+  const SESSION_NAME_KEY = "cloud-terminal-mobile-session-names";
   const ACTIVE_AGENT_KEY = "cloud-terminal-mobile-agent";
   const MOBILE_SYMBOLS = "~!@#$%^&*()_+-=[]{}\\|;:'\",.<>/?`！￥……（）【】《》、，。？；：‘’“”·—";
 
@@ -37,6 +40,7 @@
   const folderPickerPath = document.getElementById("folderPickerPath");
   const folderPickerList = document.getElementById("folderPickerList");
   const folderBackButton = document.getElementById("folderBackButton");
+  const folderCancelButton = document.getElementById("folderCancelButton");
   const terminalPage = document.getElementById("terminalPage");
   const terminalEl = document.getElementById("terminal");
   const keybar = document.getElementById("keybar");
@@ -52,6 +56,7 @@
   const targetSelection = document.getElementById("targetSelection");
   const targetFileList = document.getElementById("targetFileList");
   const parentButton = document.getElementById("parentButton");
+  const rootsButton = document.getElementById("rootsButton");
   const refreshFilesButton = document.getElementById("refreshFilesButton");
   const currentPathEl = document.getElementById("currentPath");
   const fileList = document.getElementById("fileList");
@@ -74,6 +79,15 @@
   const newPasswordInput = document.getElementById("newPasswordInput");
   const profileMessage = document.getElementById("profileMessage");
   const saveProfileButton = document.getElementById("saveProfileButton");
+  const togglePasswordButton = document.getElementById("togglePasswordButton");
+  const cancelProfileButton = document.getElementById("cancelProfileButton");
+  const passwordForm = document.getElementById("passwordForm");
+  const toggleArchiveButton = document.getElementById("toggleArchiveButton");
+  const closeArchiveButton = document.getElementById("closeArchiveButton");
+  const archivePanel = document.getElementById("archivePanel");
+  const archiveCountEl = document.getElementById("archiveCount");
+  const archivedFoldersList = document.getElementById("archivedFoldersList");
+  const archivedSessionsList = document.getElementById("archivedSessionsList");
 
   let state = null;
   let currentAccount = null;
@@ -99,6 +113,10 @@
   let folderSessions = migrateFolderSessions(readObject(FOLDER_SESSION_KEY));
   let archivedFolders = readStringSet(ARCHIVED_FOLDER_KEY);
   let archivedSessions = readStringSet(ARCHIVED_SESSION_KEY);
+  let forgottenFolders = readStringSet(FORGOTTEN_FOLDER_KEY);
+  let forgottenSessions = readStringSet(FORGOTTEN_SESSION_KEY);
+  let sessionNames = readObject(SESSION_NAME_KEY) || {};
+  const sessionInputBuffers = new Map();
   let processPanelOpen = false;
   let folderPickerOpen = false;
   let folderPickerParent = "";
@@ -246,6 +264,36 @@
     }
   });
 
+  folderCancelButton.addEventListener("click", () => closeFolderPicker());
+
+  togglePasswordButton.addEventListener("click", () => {
+    const willShow = passwordForm.hidden;
+    if (willShow) {
+      currentPasswordInput.value = "";
+      newPasswordInput.value = "";
+      profileMessage.textContent = "";
+      profileMessage.className = "settings-message";
+      passwordForm.hidden = false;
+      togglePasswordButton.hidden = true;
+      setTimeout(() => currentPasswordInput.focus(), 0);
+    }
+  });
+
+  cancelProfileButton.addEventListener("click", () => closePasswordForm());
+
+  toggleArchiveButton.addEventListener("click", () => {
+    if (archivePanel.hidden) {
+      renderArchivePanel();
+      archivePanel.hidden = false;
+    } else {
+      archivePanel.hidden = true;
+    }
+  });
+
+  closeArchiveButton.addEventListener("click", () => {
+    archivePanel.hidden = true;
+  });
+
   menuButton.addEventListener("click", (event) => {
     event.stopPropagation();
     actionMenu.hidden = !actionMenu.hidden;
@@ -287,10 +335,20 @@
   parentButton.addEventListener("click", () => {
     if (state && state.parentPath) {
       loadFiles(state.parentPath);
+    } else {
+      renderFileRoots();
     }
   });
 
-  refreshFilesButton.addEventListener("click", () => loadFiles(currentPath || activeWorkDir()));
+  rootsButton.addEventListener("click", () => renderFileRoots());
+
+  refreshFilesButton.addEventListener("click", () => {
+    if (currentPath) {
+      loadFiles(currentPath);
+    } else {
+      renderFileRoots();
+    }
+  });
   refreshDiffButton.addEventListener("click", () => loadDiff(""));
   openPreviewButton.addEventListener("click", () => openPreview());
   refreshPreviewButton.addEventListener("click", () => openPreview(true));
@@ -395,8 +453,10 @@
   async function saveProfile() {
     const currentPassword = currentPasswordInput.value;
     const newPassword = newPasswordInput.value;
+    profileMessage.className = "settings-message";
     if (!currentPassword || !newPassword) {
       profileMessage.textContent = "请输入当前密码和新密码";
+      profileMessage.classList.add("error");
       return;
     }
     saveProfileButton.disabled = true;
@@ -407,11 +467,12 @@
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ current_password: currentPassword, new_password: newPassword })
       }, 8000);
-      currentPasswordInput.value = "";
-      newPasswordInput.value = "";
       profileMessage.textContent = "账号信息已更新";
+      profileMessage.classList.add("ok");
+      setTimeout(closePasswordForm, 800);
     } catch (error) {
       profileMessage.textContent = error.message || "保存失败";
+      profileMessage.classList.add("error");
     } finally {
       saveProfileButton.disabled = false;
     }
@@ -420,11 +481,12 @@
   async function refreshWorkbenchState() {
     try {
       state = await fetchJSON("/cloud-terminal-api/workbench/state", null, 5000);
-      sessions = Array.isArray(state.sessions) ? state.sessions : [];
+      sessions = (Array.isArray(state.sessions) ? state.sessions : []).filter((item) => !forgottenSessions.has(item.id));
       ensureSelectedAgent();
       renderAgentSelector();
       renderPreviewPorts();
       renderProcessList();
+      updateArchiveCount();
       showWorkbench();
     } catch (error) {
       setConnection(error.message || "Refresh failed");
@@ -434,7 +496,7 @@
   function showWorkbench() {
     authView.hidden = true;
     workbenchView.hidden = false;
-    sessions = Array.isArray(state.sessions) ? state.sessions : [];
+    sessions = (Array.isArray(state.sessions) ? state.sessions : []).filter((item) => !forgottenSessions.has(item.id));
     ensureSelectedAgent();
     workspacePath.textContent = state.work_dir || "";
     reconcileSavedTargetWithState();
@@ -913,7 +975,7 @@
     });
     row.querySelector(".folder-add").addEventListener("click", (event) => {
       event.stopPropagation();
-      addProcessFolder(path);
+      addProcessFolder(path, true, true);
       closeFolderPicker();
       renderProcessList();
     });
@@ -999,7 +1061,7 @@
     localStorage.setItem(TARGET_KEY, JSON.stringify(selectedTarget));
     workspacePath.textContent = selectedTarget.label;
     currentPath = selectedTarget.workDir;
-    addProcessFolder(selectedTarget.workDir, false);
+    addProcessFolder(selectedTarget.workDir, false, true);
     updateSelectedTarget();
     renderTargetSelectionInList();
   }
@@ -1034,29 +1096,13 @@
     processSummary.textContent = `${busyCount} 执行中 / ${sessions.length} 会话`;
     processList.innerHTML = "";
     const roots = Array.isArray(state?.allow_paths) ? state.allow_paths : [];
-    if (roots.length > 0) {
-      const rootsBlock = document.createElement("section");
-      rootsBlock.className = "process-roots";
-      rootsBlock.innerHTML = '<strong>可访问路径</strong><div class="process-root-list"></div>';
-      const list = rootsBlock.querySelector(".process-root-list");
-      for (const root of roots) {
-        const button = document.createElement("button");
-        button.type = "button";
-        button.title = root;
-        button.innerHTML = `<span class="folder-icon">${folderIcon()}</span><span>${escapeHTML(root)}</span>`;
-        button.addEventListener("click", () => openFolderSession(root, selectedAgent));
-        list.appendChild(button);
-      }
-      processList.appendChild(rootsBlock);
-    }
     const folders = (processFolders.length > 0 ? processFolders : inferFoldersFromSessions())
-      .filter((folder) => !archivedFolders.has(folder))
-      .filter((folder) => !roots.includes(folder));
+      .filter((folder) => !archivedFolders.has(folder));
     if (folders.length === 0) {
       if (roots.length === 0) {
         processList.innerHTML = '<div class="process-empty">用户后台未配置允许访问路径。</div>';
       } else {
-        processList.appendChild(emptyProcessMessage("从上方可访问路径启动终端，或在目录选择器中添加子目录。"));
+        processList.appendChild(emptyProcessMessage("点击右上角「添加」从可访问路径里选目录。"));
       }
       return;
     }
@@ -1137,19 +1183,28 @@
     const label = item.agent_label || agentLabel(item.agent);
     const button = document.createElement("div");
     button.className = `process-item ${item.id === sessionID ? "active" : ""} ${item.busy ? "busy" : "done"}`;
+    const displayName = sessionDisplayName(item);
     button.innerHTML = `
       <span class="process-main">
-        <strong><span class="agent-chip mini">${escapeHTML(agentShortLabel(item.agent))}</span>${escapeHTML(shortSessionID(item.id))}</strong>
+        <strong class="session-title">
+          <span class="agent-chip mini">${escapeHTML(agentShortLabel(item.agent))}</span>
+          <span class="session-name" data-session-id="${escapeHTML(item.id)}">${escapeHTML(displayName)}</span>
+        </strong>
         <small>${escapeHTML(item.duration || item.last_active || "")}</small>
       </span>
       <span class="process-status"></span>
       <span class="process-actions">
+        <button class="process-rename" type="button" title="重命名" aria-label="重命名">${pencilIcon()}</button>
         <button class="process-archive" type="button" title="归档进程" aria-label="归档进程">${archiveIcon()}</button>
       </span>
     `;
     button.querySelector(".process-archive").addEventListener("click", (event) => {
       event.stopPropagation();
       archiveSession(item.id);
+    });
+    button.querySelector(".process-rename").addEventListener("click", (event) => {
+      event.stopPropagation();
+      beginRenameSession(button, item);
     });
     button.title = `${label} · ${item.id}`;
     button.addEventListener("click", () => {
@@ -1162,8 +1217,92 @@
     return button;
   }
 
+  function sessionDisplayName(item) {
+    if (!item || !item.id) {
+      return "";
+    }
+    const explicit = sessionNames[item.id];
+    if (explicit && explicit.trim()) {
+      return explicit.trim();
+    }
+    return shortSessionID(item.id);
+  }
+
+  function beginRenameSession(container, item) {
+    const nameNode = container.querySelector(".session-name");
+    if (!nameNode || container.querySelector(".session-name-input")) {
+      return;
+    }
+    const current = sessionNames[item.id] || "";
+    const input = document.createElement("input");
+    input.type = "text";
+    input.className = "session-name-input";
+    input.value = current;
+    input.placeholder = shortSessionID(item.id);
+    input.maxLength = 60;
+    nameNode.replaceWith(input);
+    input.focus();
+    input.select();
+    let finished = false;
+    const commit = (save) => {
+      if (finished) {
+        return;
+      }
+      finished = true;
+      if (save) {
+        const next = input.value.trim();
+        if (next) {
+          sessionNames[item.id] = next;
+        } else {
+          delete sessionNames[item.id];
+        }
+        localStorage.setItem(SESSION_NAME_KEY, JSON.stringify(sessionNames));
+      }
+      renderProcessList();
+    };
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        commit(true);
+      } else if (event.key === "Escape") {
+        event.preventDefault();
+        commit(false);
+      }
+    });
+    input.addEventListener("blur", () => commit(true));
+    input.addEventListener("click", (event) => event.stopPropagation());
+  }
+
+  function recordFirstInput(targetSessionID, data) {
+    if (!targetSessionID || !data) {
+      return;
+    }
+    if (sessionNames[targetSessionID]) {
+      return;
+    }
+    const buffer = sessionInputBuffers.get(targetSessionID) || "";
+    const containsNewline = /[\r\n]/.test(data);
+    const cleaned = data.replace(/[\r\n]+/g, " ");
+    const stripped = cleaned.replace(/[ -]/g, "");
+    const combined = (buffer + stripped).slice(0, 80);
+    if (containsNewline || combined.length >= 60) {
+      const candidate = combined.trim();
+      if (candidate.length >= 2) {
+        sessionNames[targetSessionID] = candidate.length > 40 ? candidate.slice(0, 40) + "…" : candidate;
+        localStorage.setItem(SESSION_NAME_KEY, JSON.stringify(sessionNames));
+        renderProcessList();
+      }
+      sessionInputBuffers.delete(targetSessionID);
+      return;
+    }
+    sessionInputBuffers.set(targetSessionID, combined);
+  }
+
   function upsertSession(next) {
     if (!next || !next.id) {
+      return;
+    }
+    if (forgottenSessions.has(next.id)) {
       return;
     }
     next.agent = normalizeAgentID(next.agent || currentSession()?.agent || selectedAgent);
@@ -1253,13 +1392,19 @@
     return currentSession()?.work_dir || selectedTarget?.workDir || state?.work_dir || "";
   }
 
-  function addProcessFolder(path, rerender = true) {
+  function addProcessFolder(path, rerender = true, unarchive = false) {
     path = String(path || "").trim();
     if (!path) {
       return;
     }
-    archivedFolders.delete(path);
-    persistSet(ARCHIVED_FOLDER_KEY, archivedFolders);
+    if (unarchive) {
+      archivedFolders.delete(path);
+      persistSet(ARCHIVED_FOLDER_KEY, archivedFolders);
+      forgottenFolders.delete(path);
+      persistSet(FORGOTTEN_FOLDER_KEY, forgottenFolders);
+    } else if (archivedFolders.has(path) || forgottenFolders.has(path)) {
+      return;
+    }
     if (!processFolders.includes(path)) {
       processFolders.unshift(path);
       localStorage.setItem(folderKey(), JSON.stringify(processFolders.slice(0, 30)));
@@ -1277,6 +1422,147 @@
     archivedFolders.add(path);
     persistSet(ARCHIVED_FOLDER_KEY, archivedFolders);
     renderProcessList();
+    updateArchiveCount();
+  }
+
+  function unarchiveFolder(path) {
+    if (!path) {
+      return;
+    }
+    archivedFolders.delete(path);
+    persistSet(ARCHIVED_FOLDER_KEY, archivedFolders);
+    forgottenFolders.delete(path);
+    persistSet(FORGOTTEN_FOLDER_KEY, forgottenFolders);
+    if (!processFolders.includes(path)) {
+      processFolders.unshift(path);
+      localStorage.setItem(folderKey(), JSON.stringify(processFolders.slice(0, 30)));
+    }
+    renderProcessList();
+    if (!archivePanel.hidden) {
+      renderArchivePanel();
+    }
+    updateArchiveCount();
+  }
+
+  function deleteArchivedFolder(path) {
+    if (!path) {
+      return;
+    }
+    archivedFolders.delete(path);
+    persistSet(ARCHIVED_FOLDER_KEY, archivedFolders);
+    forgottenFolders.add(path);
+    persistSet(FORGOTTEN_FOLDER_KEY, forgottenFolders);
+    const idx = processFolders.indexOf(path);
+    if (idx >= 0) {
+      processFolders.splice(idx, 1);
+      localStorage.setItem(folderKey(), JSON.stringify(processFolders.slice(0, 30)));
+    }
+    renderProcessList();
+    if (!archivePanel.hidden) {
+      renderArchivePanel();
+    }
+    updateArchiveCount();
+  }
+
+  function unarchiveSession(id) {
+    if (!id) {
+      return;
+    }
+    archivedSessions.delete(id);
+    persistSet(ARCHIVED_SESSION_KEY, archivedSessions);
+    forgottenSessions.delete(id);
+    persistSet(FORGOTTEN_SESSION_KEY, forgottenSessions);
+    renderProcessList();
+    if (!archivePanel.hidden) {
+      renderArchivePanel();
+    }
+    updateArchiveCount();
+  }
+
+  function deleteArchivedSession(id) {
+    if (!id) {
+      return;
+    }
+    archivedSessions.delete(id);
+    persistSet(ARCHIVED_SESSION_KEY, archivedSessions);
+    forgottenSessions.add(id);
+    persistSet(FORGOTTEN_SESSION_KEY, forgottenSessions);
+    const idx = sessions.findIndex((item) => item.id === id);
+    if (idx >= 0) {
+      sessions.splice(idx, 1);
+    }
+    delete sessionNames[id];
+    localStorage.setItem(SESSION_NAME_KEY, JSON.stringify(sessionNames));
+    renderProcessList();
+    if (!archivePanel.hidden) {
+      renderArchivePanel();
+    }
+    updateArchiveCount();
+  }
+
+  function updateArchiveCount() {
+    if (!archiveCountEl) {
+      return;
+    }
+    const total = archivedFolders.size + archivedSessions.size;
+    archiveCountEl.textContent = total === 0 ? "0" : String(total);
+    toggleArchiveButton.disabled = total === 0;
+  }
+
+  function renderArchivePanel() {
+    archivedFoldersList.innerHTML = "";
+    const folders = Array.from(archivedFolders);
+    if (folders.length === 0) {
+      archivedFoldersList.innerHTML = '<div class="archive-empty">没有归档的文件夹</div>';
+    } else {
+      for (const folder of folders) {
+        const row = document.createElement("div");
+        row.className = "archive-row";
+        row.title = folder;
+        row.innerHTML = `
+          <span class="archive-name">${escapeHTML(baseName(folder) || folder)}</span>
+          <span class="archive-actions">
+            <button class="ghost archive-restore" type="button">恢复</button>
+            <button class="ghost archive-delete" type="button">删除</button>
+          </span>
+        `;
+        row.querySelector(".archive-restore").addEventListener("click", () => unarchiveFolder(folder));
+        row.querySelector(".archive-delete").addEventListener("click", () => {
+          if (confirm(`确定删除归档文件夹「${baseName(folder) || folder}」？`)) {
+            deleteArchivedFolder(folder);
+          }
+        });
+        archivedFoldersList.appendChild(row);
+      }
+    }
+
+    archivedSessionsList.innerHTML = "";
+    const sessionIds = Array.from(archivedSessions);
+    if (sessionIds.length === 0) {
+      archivedSessionsList.innerHTML = '<div class="archive-empty">没有归档的终端</div>';
+    } else {
+      for (const id of sessionIds) {
+        const meta = sessions.find((item) => item.id === id);
+        const label = sessionNames[id] || (meta?.work_dir ? `${baseName(meta.work_dir) || meta.work_dir} · ${meta.agent || "session"}` : id);
+        const row = document.createElement("div");
+        row.className = "archive-row";
+        row.title = id;
+        row.innerHTML = `
+          <span class="archive-name">${escapeHTML(label)}</span>
+          <span class="archive-actions">
+            <button class="ghost archive-restore" type="button">恢复</button>
+            <button class="ghost archive-delete" type="button">删除</button>
+          </span>
+        `;
+        row.querySelector(".archive-restore").addEventListener("click", () => unarchiveSession(id));
+        row.querySelector(".archive-delete").addEventListener("click", () => {
+          if (confirm(`确定删除归档终端「${label}」？此后不再恢复。`)) {
+            deleteArchivedSession(id);
+          }
+        });
+        archivedSessionsList.appendChild(row);
+      }
+    }
   }
 
   function archiveSession(id) {
@@ -1298,6 +1584,7 @@
       agentStarted = false;
     }
     renderProcessList();
+    updateArchiveCount();
   }
 
   function syncFoldersFromSessions() {
@@ -1342,6 +1629,7 @@
     } else if (data === "\u0003" || data === "\u0004") {
       markSessionDone(sessionID);
     }
+    recordFirstInput(sessionID, data);
     socket.send(JSON.stringify({ type: "input", data }));
   }
 
@@ -1457,21 +1745,82 @@
   async function loadFiles(path) {
     if (tunnelUnavailableForUser()) {
       fileList.innerHTML = '<div class="empty">本地穿透未开启，文件不可访问。</div>';
+      currentPathEl.textContent = "";
+      currentPathEl.title = "";
+      parentButton.disabled = true;
       return;
     }
     if (!path) {
+      renderFileRoots();
       return;
     }
     try {
       const data = await fetchJSON(`/cloud-terminal-api/workbench/files?path=${encodeURIComponent(path)}`);
       currentPath = data.path;
-      state.parentPath = data.parent;
-      currentPathEl.textContent = data.path;
+      if (state) {
+        state.parentPath = data.parent;
+      }
+      currentPathEl.textContent = shortenPath(data.path);
+      currentPathEl.title = data.path;
       parentButton.disabled = !data.parent;
       renderFileList(data.entries || []);
     } catch (error) {
       fileList.innerHTML = `<div class="empty">${escapeHTML(error.message || "Load failed")}</div>`;
     }
+  }
+
+  function renderFileRoots() {
+    currentPath = "";
+    if (state) {
+      state.parentPath = "";
+    }
+    currentPathEl.textContent = "可访问路径";
+    currentPathEl.title = "";
+    parentButton.disabled = true;
+    const roots = Array.isArray(state?.allow_paths) ? state.allow_paths : [];
+    if (roots.length === 0) {
+      fileList.innerHTML = '<div class="empty">后台未配置允许访问路径。</div>';
+      return;
+    }
+    fileList.innerHTML = "";
+    for (const root of roots) {
+      const button = document.createElement("button");
+      button.className = "file-row";
+      button.type = "button";
+      button.title = root;
+      button.innerHTML = `
+        <span class="file-icon">${folderIcon()}</span>
+        <span class="file-name">${escapeHTML(shortenPath(root))}</span>
+        <span class="file-meta">Root</span>
+      `;
+      button.addEventListener("click", () => loadFiles(root));
+      fileList.appendChild(button);
+    }
+  }
+
+  function shortenPath(path) {
+    if (!path) {
+      return "";
+    }
+    const trimmed = path.replace(/\/+$/, "");
+    if (trimmed === "" || trimmed === "/") {
+      return "/";
+    }
+    const idx = trimmed.lastIndexOf("/");
+    if (idx < 0) {
+      return trimmed;
+    }
+    const name = trimmed.slice(idx + 1) || trimmed;
+    return name;
+  }
+
+  function closePasswordForm() {
+    passwordForm.hidden = true;
+    togglePasswordButton.hidden = false;
+    currentPasswordInput.value = "";
+    newPasswordInput.value = "";
+    profileMessage.textContent = "";
+    profileMessage.className = "settings-message";
   }
 
   function renderFileList(entries) {
@@ -1594,6 +1943,13 @@
         scrollTerminalToBottom();
       }
     }
+    if (tab === "files") {
+      if (currentPath) {
+        loadFiles(currentPath);
+      } else {
+        renderFileRoots();
+      }
+    }
     if (tab === "preview" && !previewFrame.src) {
       openPreview();
     }
@@ -1656,7 +2012,11 @@
 
   function setWorkbenchTabsEnabled(enabled) {
     document.querySelectorAll("[data-tab]").forEach((button) => {
-      button.disabled = !enabled && button.dataset.tab !== "settings";
+      const tab = button.dataset.tab;
+      // Terminal and Settings remain reachable even before a session has started,
+      // so the user can switch back from Settings to the target picker.
+      const alwaysEnabled = tab === "settings" || tab === "terminal";
+      button.disabled = !enabled && !alwaysEnabled;
     });
     reconnectButton.disabled = !enabled || !sessionID;
     stopSessionButton.disabled = !enabled || !sessionID;
@@ -2018,5 +2378,9 @@
 
   function archiveIcon() {
     return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M6 7l1 13h10l1-13M9 11h6M8 4h8l1 3H7l1-3Z"/></svg>';
+  }
+
+  function pencilIcon() {
+    return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4l10-10-4-4L4 16v4Z"/><path d="m14 6 4 4"/></svg>';
   }
 })();

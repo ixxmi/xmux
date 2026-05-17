@@ -658,6 +658,16 @@ func (s *Server) tunnelAgentWS(w http.ResponseWriter, r *http.Request) {
 		exitWaiters:  make(map[string]chan workbenchServerMessage),
 	}
 	client.sessionSink = s.handleTunnelSessionMessage
+	if existing := s.tunnel.currentForAccount(account); existing != nil && existing != client {
+		s.logger.Warn("reject duplicate agent tunnel", "account", account, "edge_id", hello.EdgeID, "existing_edge_id", existing.edgeID)
+		_ = conn.WriteJSON(tunnelEnvelope{
+			Type:  "error",
+			Code:  "already_connected",
+			Error: "another agent for this account is already connected to the gateway",
+		})
+		_ = conn.Close()
+		return
+	}
 	s.tunnel.set(client)
 	_ = client.write(tunnelEnvelope{Type: "hello_ack", OK: true})
 	s.logger.Info("edge agent tunnel connected", "edge_id", client.edgeID, "edge_name", client.edgeName)

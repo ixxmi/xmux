@@ -22,6 +22,7 @@ type tunnelEnvelope struct {
 	ID        string          `json:"id,omitempty"`
 	SessionID string          `json:"session_id,omitempty"`
 	OK        bool            `json:"ok,omitempty"`
+	Code      string          `json:"code,omitempty"`
 	Error     string          `json:"error,omitempty"`
 	Payload   jsonRawEnvelope `json:"payload,omitempty"`
 }
