@@ -394,7 +394,7 @@ func (a *Agent) handleStart(ctx context.Context, client *clientConn, env gateway
 	if bin == "" {
 		bin = agentID
 	}
-	workDir, args, err := a.resolveStartTarget(req.WorkDir, req.Target, req.Args)
+	workDir, args, err := a.resolveStartTarget(req.WorkDir, req.Target, req.Args, req.AllowPaths, req.RequirePathMatch)
 	if err != nil {
 		respond(client, env.ID, err, nil)
 		return
@@ -508,8 +508,9 @@ func (a *Agent) handleStart(ctx context.Context, client *clientConn, env gateway
 	}()
 }
 
-func (a *Agent) resolveStartTarget(workDir string, target string, args []string) (string, []string, error) {
+func (a *Agent) resolveStartTarget(workDir string, target string, args []string, allowPaths []string, requirePathMatch bool) (string, []string, error) {
 	cfg := a.config.Snapshot()
+	allowed := effectiveAllowedPaths(cfg.Policy.AllowPaths, allowPaths, requirePathMatch)
 	resolvedWorkDir := config.NormalizePath(workDir)
 	if resolvedWorkDir == "" {
 		resolvedWorkDir = config.NormalizePath(cfg.Edge.WorkDir)
@@ -523,7 +524,7 @@ func (a *Agent) resolveStartTarget(workDir string, target string, args []string)
 		}
 	}
 	if resolvedTarget != "" {
-		if !pathAllowed(resolvedTarget, cfg.Policy.AllowPaths) {
+		if !pathAllowed(resolvedTarget, allowed) {
 			return "", nil, errors.New("target is outside allowed roots")
 		}
 		info, err := os.Stat(resolvedTarget)
@@ -538,7 +539,7 @@ func (a *Agent) resolveStartTarget(workDir string, target string, args []string)
 			resolvedArgs = []string{filepath.Base(resolvedTarget)}
 		}
 	}
-	if !pathAllowed(resolvedWorkDir, cfg.Policy.AllowPaths) {
+	if !pathAllowed(resolvedWorkDir, allowed) {
 		return "", nil, errors.New("work_dir is outside allowed roots")
 	}
 	info, err := os.Stat(resolvedWorkDir)
@@ -549,6 +550,32 @@ func (a *Agent) resolveStartTarget(workDir string, target string, args []string)
 		return "", nil, errors.New("work_dir is not a directory")
 	}
 	return resolvedWorkDir, resolvedArgs, nil
+}
+
+func effectiveAllowedPaths(local []string, account []string, requirePathMatch bool) []string {
+	local = cleanAgentPaths(local)
+	account = cleanAgentPaths(account)
+	if len(account) == 0 && !requirePathMatch {
+		return local
+	}
+	var out []string
+	for _, path := range account {
+		if pathAllowed(path, local) && !slices.Contains(out, path) {
+			out = append(out, path)
+		}
+	}
+	return out
+}
+
+func cleanAgentPaths(values []string) []string {
+	var out []string
+	for _, value := range values {
+		value = config.NormalizePath(value)
+		if value != "" && !slices.Contains(out, value) {
+			out = append(out, value)
+		}
+	}
+	return out
 }
 
 func (a *Agent) agentCommand(agentID string) string {

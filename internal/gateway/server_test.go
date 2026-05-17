@@ -491,8 +491,11 @@ func TestUserSettingsPersistAndConstrainPolicy(t *testing.T) {
 	if settings.Account != "user@example.com" || settings.Role != accountRoleUser {
 		t.Fatalf("settings identity = %+v", settings)
 	}
-	if len(settings.AllowPaths) != 1 || settings.AllowPaths[0] != root {
-		t.Fatalf("settings allow_paths = %v, want %s", settings.AllowPaths, root)
+	if len(settings.AllowPaths) != 0 {
+		t.Fatalf("settings allow_paths = %v, want empty account paths", settings.AllowPaths)
+	}
+	if len(settings.PolicyLimits.AllowPaths) != 0 {
+		t.Fatalf("policy_limits allow_paths = %v, want hidden from account policy", settings.PolicyLimits.AllowPaths)
 	}
 
 	// Per-user allow_paths are not bounded by the global policy; a path
@@ -552,7 +555,7 @@ func TestUserSettingsPersistAndConstrainPolicy(t *testing.T) {
 	}
 }
 
-func TestUserFSOnlyListsGlobalAllowedRoots(t *testing.T) {
+func TestUserFSOnlyListsAccountAllowedRoots(t *testing.T) {
 	t.Parallel()
 
 	root := t.TempDir()
@@ -584,8 +587,31 @@ func TestUserFSOnlyListsGlobalAllowedRoots(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&roots); err != nil {
 		t.Fatalf("decode roots: %v", err)
 	}
-	if len(roots.Entries) != 1 || roots.Entries[0].Path != root {
-		t.Fatalf("roots entries = %+v, want only %s", roots.Entries, root)
+	if len(roots.Entries) != 0 {
+		t.Fatalf("roots entries = %+v, want empty before account path is saved", roots.Entries)
+	}
+
+	if _, err := server.accountStore().SaveUserSettings("user@example.com", userSettingsUpdatePayload{
+		AllowPaths: []string{inside},
+		Commands:   map[string]adminCommandPayload{"pwd": {Enabled: true}},
+	}, server.config.Snapshot().Policy); err != nil {
+		t.Fatalf("save user settings: %v", err)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/cloud-terminal-api/user/fs", nil)
+	for _, cookie := range cookies {
+		req.AddCookie(cookie)
+	}
+	resp = httptest.NewRecorder()
+	handler.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("user fs roots after account path status = %d body = %s", resp.Code, resp.Body.String())
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&roots); err != nil {
+		t.Fatalf("decode roots after account path: %v", err)
+	}
+	if len(roots.Entries) != 1 || roots.Entries[0].Path != inside {
+		t.Fatalf("roots entries = %+v, want only account path %s", roots.Entries, inside)
 	}
 
 	req = httptest.NewRequest(http.MethodGet, "/cloud-terminal-api/user/fs?path="+urlQueryEscape(inside), nil)
@@ -606,6 +632,70 @@ func TestUserFSOnlyListsGlobalAllowedRoots(t *testing.T) {
 	handler.ServeHTTP(resp, req)
 	if resp.Code != http.StatusForbidden {
 		t.Fatalf("user fs outside status = %d body = %s", resp.Code, resp.Body.String())
+	}
+}
+
+func TestAgentBindClearsAccountAllowPaths(t *testing.T) {
+	t.Parallel()
+
+	var putPayload userSettingsUpdatePayload
+	cloud := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/cloud-terminal-api/user/settings":
+			writeJSON(w, http.StatusOK, userSettingsPayload{
+				Account:            "user@example.com",
+				CloudTunnelEnabled: true,
+				Commands: map[string]adminCommandPayload{
+					"pwd": {Enabled: true},
+				},
+				AllowPaths: []string{"/old/client/path"},
+			})
+		case r.Method == http.MethodPut && r.URL.Path == "/cloud-terminal-api/user/settings":
+			if err := json.NewDecoder(r.Body).Decode(&putPayload); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			writeJSON(w, http.StatusOK, userSettingsPayload{Account: "user@example.com"})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer cloud.Close()
+
+	configPath := filepath.Join(t.TempDir(), "agent.yaml")
+	cfg := config.Config{
+		Server:      config.ServerConfig{Addr: "127.0.0.1:0"},
+		CloudTunnel: config.CloudTunnelConfig{GatewayURL: cloud.URL},
+		Policy:      minimalPolicy(),
+	}
+	server := NewServer(Options{
+		Config:    config.NewStore(configPath, &cfg),
+		AgentMode: true,
+	})
+	handler := server.AgentRoutes(cloud.URL)
+
+	body := bytes.NewBufferString(`{"account":"user@example.com","session_id":"session-123"}`)
+	req := httptest.NewRequest(http.MethodPost, "/cloud-terminal-api/agent/bind", body)
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+	handler.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("bind status = %d body = %s", resp.Code, resp.Body.String())
+	}
+	if len(putPayload.AllowPaths) != 0 {
+		t.Fatalf("bind allow_paths = %v, want cleared", putPayload.AllowPaths)
+	}
+
+	putPayload.AllowPaths = []string{"/not-cleared"}
+	req = httptest.NewRequest(http.MethodPost, "/cloud-terminal-api/agent/bind", bytes.NewBufferString(`{"clear":true}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp = httptest.NewRecorder()
+	handler.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("unbind status = %d body = %s", resp.Code, resp.Body.String())
+	}
+	if len(putPayload.AllowPaths) != 0 {
+		t.Fatalf("unbind allow_paths = %v, want cleared", putPayload.AllowPaths)
 	}
 }
 

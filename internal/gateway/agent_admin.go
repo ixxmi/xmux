@@ -1,6 +1,8 @@
 package gateway
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"io/fs"
 	"net/http"
@@ -208,6 +210,12 @@ func (s *Server) agentBind(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if payload.Clear {
+		cfg := s.config.Snapshot()
+		if account := strings.TrimSpace(cfg.CloudTunnel.Account); account != "" {
+			if err := s.clearBoundAccountPaths(r.Context(), account, cfg.CloudTunnel.SessionID); err != nil {
+				s.logger.Warn("clear bound account allow paths", "account", account, "error", err)
+			}
+		}
 		if err := s.config.BindTunnelAccount("", ""); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -219,11 +227,85 @@ func (s *Server) agentBind(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "account and session_id are required", http.StatusBadRequest)
 		return
 	}
+	if err := s.clearBoundAccountPaths(r.Context(), payload.Account, payload.SessionID); err != nil {
+		s.logger.Warn("clear newly bound account allow paths", "account", payload.Account, "error", err)
+	}
 	if err := s.config.BindTunnelAccount(payload.Account, payload.SessionID); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	writeJSON(w, http.StatusOK, s.snapshotAgentConfig())
+}
+
+func (s *Server) clearBoundAccountPaths(ctx context.Context, account string, sessionID string) error {
+	account = normalizeTunnelAccount(account)
+	if account == "" {
+		return nil
+	}
+	target := s.resolveCloudBase("")
+	if target == "" {
+		return nil
+	}
+	settingsURL := strings.TrimRight(target, "/") + "/cloud-terminal-api/user/settings"
+	getReq, err := http.NewRequestWithContext(ctx, http.MethodGet, settingsURL, nil)
+	if err != nil {
+		return err
+	}
+	for _, cookie := range agentCloudCookies(sessionID) {
+		getReq.AddCookie(cookie)
+	}
+	getResp, err := http.DefaultClient.Do(getReq)
+	if err != nil {
+		return err
+	}
+	defer getResp.Body.Close()
+	if getResp.StatusCode == http.StatusUnauthorized || getResp.StatusCode == http.StatusForbidden || getResp.StatusCode == http.StatusNotFound {
+		return nil
+	}
+	if getResp.StatusCode < 200 || getResp.StatusCode >= 300 {
+		return nil
+	}
+	var settings userSettingsPayload
+	if err := json.NewDecoder(getResp.Body).Decode(&settings); err != nil {
+		return err
+	}
+	if normalizeTunnelAccount(settings.Account) != account {
+		return nil
+	}
+	payload := userSettingsUpdatePayload{
+		CloudTunnelEnabled: settings.CloudTunnelEnabled,
+		Commands:           settings.Commands,
+		AllowPaths:         nil,
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	putReq, err := http.NewRequestWithContext(ctx, http.MethodPut, settingsURL, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	putReq.Header.Set("Content-Type", "application/json")
+	for _, cookie := range agentCloudCookies(sessionID) {
+		putReq.AddCookie(cookie)
+	}
+	putResp, err := http.DefaultClient.Do(putReq)
+	if err != nil {
+		return err
+	}
+	defer putResp.Body.Close()
+	return nil
+}
+
+func agentCloudCookies(sessionID string) []*http.Cookie {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return nil
+	}
+	return []*http.Cookie{
+		{Name: accountCookieName, Value: sessionID},
+		{Name: workbenchCookieName, Value: sessionID},
+	}
 }
 
 // agentLocalFS serves the local filesystem without cloud auth —

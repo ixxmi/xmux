@@ -37,7 +37,7 @@ func (r *tunnelRuntime) ResolveWorkbenchStart(opts workbenchStartOptions) (workb
 	}
 	info := client.info()
 	policyCfg := r.policyForAccount(opts.Account)
-	allowPaths := filterAllowedPaths(info.allowPaths, policyCfg.AllowPaths)
+	allowPaths := filterAllowedPaths(policyCfg.AllowPaths, info.allowPaths)
 
 	agentID := normalizeWorkbenchAgentID(opts.Agent)
 	var selected workbenchAgentInfo
@@ -130,19 +130,22 @@ func (r *tunnelRuntime) StartInteractive(ctx context.Context, req edge.ExecReque
 		bin = args[0]
 		args = args[1:]
 	}
+	policyCfg := r.policyForAccount(req.User)
 	var out tunnelStartSessionResponse
 	err := client.request(ctx, "start_session", tunnelStartSessionRequest{
-		SessionID: req.SessionID,
-		RequestID: req.RequestID,
-		Account:   req.User,
-		Agent:     agent,
-		Command:   agent,
-		Bin:       bin,
-		WorkDir:   req.WorkDir,
-		Target:    firstPathArg(args),
-		Args:      args,
-		Rows:      req.Rows,
-		Cols:      req.Cols,
+		SessionID:        req.SessionID,
+		RequestID:        req.RequestID,
+		Account:          req.User,
+		Agent:            agent,
+		Command:          agent,
+		Bin:              bin,
+		WorkDir:          req.WorkDir,
+		Target:           firstPathArg(args),
+		Args:             args,
+		AllowPaths:       slices.Clone(policyCfg.AllowPaths),
+		RequirePathMatch: policyCfg.RequirePathMatch,
+		Rows:             req.Rows,
+		Cols:             req.Cols,
 	}, &out)
 	if err != nil {
 		return nil, err

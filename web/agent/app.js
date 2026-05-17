@@ -154,7 +154,7 @@ async function bindLocalClient() {
 }
 
 async function unbindLocalClient() {
-  if (!confirm("解绑后客户端将断开反向穿透，确认继续？")) {
+  if (!confirm("解绑后客户端将断开反向穿透，并清空当前账号保存的允许路径，确认继续？")) {
     return;
   }
   els.bindButton.disabled = true;
@@ -168,7 +168,14 @@ async function unbindLocalClient() {
     });
     state.agentConfig = await res.json();
     renderAgentConfig(state.agentConfig);
-    setBindMessage("已解绑", "ok");
+    if (state.cloudSettings) {
+      state.cloudSettings.allow_paths = [];
+      renderCloudSettings();
+    } else {
+      els.globalAllowPaths.value = "";
+      syncAllowedButtons();
+    }
+    setBindMessage("已解绑，已清空当前账号允许路径", "ok");
     setTimeout(() => setBindMessage("", ""), 2000);
   } catch (error) {
     setBindMessage(error.message || "解绑失败", "error");

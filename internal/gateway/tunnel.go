@@ -62,17 +62,19 @@ type tunnelHello struct {
 type TunnelHello = tunnelHello
 
 type tunnelStartSessionRequest struct {
-	SessionID string   `json:"session_id"`
-	RequestID string   `json:"request_id"`
-	Account   string   `json:"account,omitempty"`
-	Agent     string   `json:"agent"`
-	Command   string   `json:"command"`
-	Bin       string   `json:"bin,omitempty"`
-	WorkDir   string   `json:"work_dir"`
-	Target    string   `json:"target,omitempty"`
-	Args      []string `json:"args,omitempty"`
-	Rows      uint16   `json:"rows"`
-	Cols      uint16   `json:"cols"`
+	SessionID        string   `json:"session_id"`
+	RequestID        string   `json:"request_id"`
+	Account          string   `json:"account,omitempty"`
+	Agent            string   `json:"agent"`
+	Command          string   `json:"command"`
+	Bin              string   `json:"bin,omitempty"`
+	WorkDir          string   `json:"work_dir"`
+	Target           string   `json:"target,omitempty"`
+	Args             []string `json:"args,omitempty"`
+	AllowPaths       []string `json:"allow_paths"`
+	RequirePathMatch bool     `json:"require_path_match,omitempty"`
+	Rows             uint16   `json:"rows"`
+	Cols             uint16   `json:"cols"`
 }
 
 type TunnelStartSessionRequest = tunnelStartSessionRequest

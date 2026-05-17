@@ -90,9 +90,9 @@ function renderPolicySummary() {
   const limits = state.settings?.policy_limits || {};
   const commands = limits.commands || {};
   const enabledCommands = Object.values(commands).filter((item) => item.enabled !== false).length;
-  const paths = Array.isArray(limits.allow_paths) ? limits.allow_paths : [];
+  const paths = Array.isArray(state.settings?.allow_paths) ? state.settings.allow_paths : [];
   els.policySummary.innerHTML = `
-    <div><span>全局路径</span><strong>${paths.length}</strong></div>
+    <div><span>账号路径</span><strong>${paths.length}</strong></div>
     <div><span>可用命令</span><strong>${enabledCommands}</strong></div>
     <div><span>黑名单</span><strong>${(limits.deny || []).length}</strong></div>
   `;
@@ -259,7 +259,7 @@ async function loadFS(path) {
     const data = await fetchJSON(`/cloud-terminal-api/user/fs?path=${encodeURIComponent(path || "")}`);
     state.currentPath = data.path || "";
     state.entries = data.entries || [];
-    els.currentPath.textContent = data.path || "全局路径";
+    els.currentPath.textContent = data.path || "账号路径";
     els.upButton.dataset.parent = data.parent || "";
     els.upButton.disabled = !data.parent && Boolean(data.path);
     renderFiles();
@@ -272,7 +272,7 @@ function renderFiles() {
   els.fileList.innerHTML = "";
   els.fileCount.textContent = `${state.entries.length} 项`;
   if (state.entries.length === 0) {
-    els.fileList.innerHTML = '<div class="empty-state">没有可显示路径。</div>';
+    els.fileList.innerHTML = '<div class="empty-state">当前账号没有可访问路径。请先在已绑定客户端的文件路径页添加并保存。</div>';
     return;
   }
   for (const entry of state.entries) {

@@ -1069,9 +1069,8 @@ func normalizeAccountRole(role string) string {
 
 func defaultUserSettings(username string, defaults policy.Config) userSettings {
 	return userSettings{
-		Username:   normalizeTunnelAccount(username),
-		Commands:   clonePolicyCommands(defaults.Commands),
-		AllowPaths: slices.Clone(defaults.AllowPaths),
+		Username: normalizeTunnelAccount(username),
+		Commands: clonePolicyCommands(defaults.Commands),
 	}
 }
 
@@ -1086,9 +1085,10 @@ func cloneUserSettings(settings userSettings) userSettings {
 
 func clonePolicyConfig(cfg policy.Config) policy.Config {
 	return policy.Config{
-		Deny:       slices.Clone(cfg.Deny),
-		AllowPaths: slices.Clone(cfg.AllowPaths),
-		Commands:   clonePolicyCommands(cfg.Commands),
+		Deny:             slices.Clone(cfg.Deny),
+		AllowPaths:       slices.Clone(cfg.AllowPaths),
+		Commands:         clonePolicyCommands(cfg.Commands),
+		RequirePathMatch: cfg.RequirePathMatch,
 	}
 }
 
@@ -1161,12 +1161,10 @@ func userSettingsFromPayload(username string, payload userSettingsUpdatePayload,
 
 func policyFromUserSettings(settings userSettings, global policy.Config) (policy.Config, error) {
 	next := policy.Config{
-		Deny:       slices.Clone(global.Deny),
-		AllowPaths: slices.Clone(settings.AllowPaths),
-		Commands:   make(map[string]policy.CommandPolicy),
-	}
-	if len(next.AllowPaths) == 0 {
-		next.AllowPaths = slices.Clone(global.AllowPaths)
+		Deny:             slices.Clone(global.Deny),
+		AllowPaths:       slices.Clone(settings.AllowPaths),
+		Commands:         make(map[string]policy.CommandPolicy),
+		RequirePathMatch: true,
 	}
 	denied := make(map[string]struct{}, len(global.Deny))
 	for _, command := range global.Deny {
@@ -1211,7 +1209,7 @@ func userSettingsToPayload(settings userSettings, account accountPublicInfo, glo
 		AllowPaths:         slices.Clone(settings.AllowPaths),
 		PolicyLimits: userPolicyLimitsPayload{
 			Commands:   adminPayloadCommands(global.Commands),
-			AllowPaths: slices.Clone(global.AllowPaths),
+			AllowPaths: nil,
 			Deny:       slices.Clone(global.Deny),
 		},
 	}

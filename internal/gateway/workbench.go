@@ -1202,7 +1202,7 @@ func (s *Server) workbenchStatePayload(account string) workbenchStatePayload {
 			}
 		}
 		info := client.info()
-		allowPaths := filterAllowedPaths(info.allowPaths, policyCfg.AllowPaths)
+		allowPaths := filterAllowedPaths(policyCfg.AllowPaths, info.allowPaths)
 		workDir := firstAllowedPath(info.workDir, allowPaths)
 		return workbenchStatePayload{
 			EdgeID:       info.edgeID,
@@ -1485,11 +1485,12 @@ func (s *Server) workbenchFiles(w http.ResponseWriter, r *http.Request) {
 		cfg := s.config.Snapshot()
 		policyCfg := s.policyForAccount(identity.Account, cfg.Policy)
 		requestedPath := config.NormalizePath(r.URL.Query().Get("path"))
+		info := client.info()
+		allowPaths := filterAllowedPaths(policyCfg.AllowPaths, info.allowPaths)
 		if requestedPath == "" {
-			info := client.info()
-			requestedPath = firstAllowedPath(info.workDir, filterAllowedPaths(info.allowPaths, policyCfg.AllowPaths))
+			requestedPath = firstAllowedPath(info.workDir, allowPaths)
 		}
-		if !pathWithinAllowed(requestedPath, policyCfg.AllowPaths) {
+		if !pathWithinAllowed(requestedPath, allowPaths) {
 			http.Error(w, "path is outside allowed roots", http.StatusForbidden)
 			return
 		}
@@ -1498,9 +1499,9 @@ func (s *Server) workbenchFiles(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
 		}
-		response.AllowPaths = filterAllowedPaths(response.AllowPaths, policyCfg.AllowPaths)
-		response.Entries = filterWorkbenchFileEntriesToPolicy(response.Entries, policyCfg.AllowPaths)
-		if response.Parent != "" && !pathWithinAllowed(response.Parent, policyCfg.AllowPaths) {
+		response.AllowPaths = allowPaths
+		response.Entries = filterWorkbenchFileEntriesToPolicy(response.Entries, allowPaths)
+		if response.Parent != "" && !pathWithinAllowed(response.Parent, allowPaths) {
 			response.Parent = ""
 		}
 		writeJSON(w, http.StatusOK, response)
@@ -1580,7 +1581,9 @@ func (s *Server) workbenchFile(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "path is required", http.StatusBadRequest)
 			return
 		}
-		if !pathWithinAllowed(path, policyCfg.AllowPaths) {
+		info := client.info()
+		allowPaths := filterAllowedPaths(policyCfg.AllowPaths, info.allowPaths)
+		if !pathWithinAllowed(path, allowPaths) {
 			http.Error(w, "path is outside allowed roots", http.StatusForbidden)
 			return
 		}
@@ -1650,11 +1653,12 @@ func (s *Server) workbenchWarmup(w http.ResponseWriter, r *http.Request) {
 		cfg := s.config.Snapshot()
 		policyCfg := s.policyForAccount(identity.Account, cfg.Policy)
 		path := config.NormalizePath(r.URL.Query().Get("path"))
+		info := client.info()
+		allowPaths := filterAllowedPaths(policyCfg.AllowPaths, info.allowPaths)
 		if path == "" {
-			info := client.info()
-			path = firstAllowedPath(info.workDir, filterAllowedPaths(info.allowPaths, policyCfg.AllowPaths))
+			path = firstAllowedPath(info.workDir, allowPaths)
 		}
-		if !pathWithinAllowed(path, policyCfg.AllowPaths) {
+		if !pathWithinAllowed(path, allowPaths) {
 			http.Error(w, "path is outside allowed roots", http.StatusForbidden)
 			return
 		}
@@ -1709,16 +1713,17 @@ func (s *Server) workbenchDiff(w http.ResponseWriter, r *http.Request) {
 		policyCfg := s.policyForAccount(identity.Account, cfg.Policy)
 		workDir := config.NormalizePath(r.URL.Query().Get("work_dir"))
 		path := config.NormalizePath(r.URL.Query().Get("path"))
+		info := client.info()
+		allowPaths := filterAllowedPaths(policyCfg.AllowPaths, info.allowPaths)
 		if workDir == "" {
-			info := client.info()
-			workDir = firstAllowedPath(info.workDir, filterAllowedPaths(info.allowPaths, policyCfg.AllowPaths))
+			workDir = firstAllowedPath(info.workDir, allowPaths)
 		}
-		if !pathWithinAllowed(workDir, policyCfg.AllowPaths) {
+		if !pathWithinAllowed(workDir, allowPaths) {
 			http.Error(w, "work_dir is outside allowed roots", http.StatusForbidden)
 			return
 		}
 		if path != "" {
-			if !pathWithinAllowed(path, policyCfg.AllowPaths) {
+			if !pathWithinAllowed(path, allowPaths) {
 				http.Error(w, "path is outside allowed roots", http.StatusForbidden)
 				return
 			}

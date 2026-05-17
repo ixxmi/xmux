@@ -9,9 +9,10 @@ import (
 )
 
 type Config struct {
-	Deny       []string                 `yaml:"deny"`
-	AllowPaths []string                 `yaml:"allow_paths"`
-	Commands   map[string]CommandPolicy `yaml:"commands"`
+	Deny             []string                 `yaml:"deny"`
+	AllowPaths       []string                 `yaml:"allow_paths"`
+	Commands         map[string]CommandPolicy `yaml:"commands"`
+	RequirePathMatch bool                     `yaml:"-" json:"-"`
 }
 
 type CommandPolicy struct {
@@ -93,7 +94,7 @@ func (e *Engine) Decide(command string, args []string) (*Decision, error) {
 	}
 
 	allowedPaths := append(slices.Clone(e.cfg.AllowPaths), rule.AllowPaths...)
-	if len(allowedPaths) > 0 {
+	if len(allowedPaths) > 0 || e.cfg.RequirePathMatch {
 		if err := validatePaths(decisionArgs, allowedPaths); err != nil {
 			return nil, fmt.Errorf("%w: %v", ErrDenied, err)
 		}

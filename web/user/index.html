@@ -51,7 +51,7 @@
             </article>
             <article class="panel">
               <h2>策略边界</h2>
-              <p>管理员配置的是全局上限。你只能在这个范围内缩小自己的命令和文件路径权限。</p>
+              <p>管理员只控制命令上限。文件路径按账号和已绑定客户端隔离，取消绑定客户端后会清空该账号保存的路径。</p>
               <div id="policySummary" class="summary-grid"></div>
             </article>
           </div>
@@ -91,7 +91,7 @@
           <div class="path-layout">
             <article class="panel path-browser-panel">
               <div class="panel-toolbar">
-                <h2>全局可访问路径</h2>
+                <h2>账号可访问路径</h2>
                 <span id="fileCount" class="path-count">0 项</span>
               </div>
               <div class="pathbar">

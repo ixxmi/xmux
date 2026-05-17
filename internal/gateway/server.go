@@ -1052,25 +1052,28 @@ func (s *Server) userFS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cfg := s.config.Snapshot()
-	roots := cleanPaths(cfg.Policy.AllowPaths)
+	policyCfg := s.policyForAccount(identity.Username, cfg.Policy)
+	roots := cleanPaths(policyCfg.AllowPaths)
 	path := config.NormalizePath(r.URL.Query().Get("path"))
-	if path == "" {
-		writeJSON(w, http.StatusOK, fsListResponse{
-			Path:    "",
-			Parent:  "",
-			Roots:   slices.Clone(roots),
-			Entries: rootEntries(roots),
-		})
-		return
-	}
-	if !pathWithinAllowed(path, roots) {
-		http.Error(w, "path is outside global allowed roots", http.StatusForbidden)
-		return
-	}
 	if s.runtimeIsTunnel() {
 		client := s.tunnelClientForAccount(identity.Username)
 		if client == nil {
 			http.Error(w, tunnelUnavailable().Error(), http.StatusServiceUnavailable)
+			return
+		}
+		info := client.info()
+		roots = filterAllowedPaths(roots, info.allowPaths)
+		if path == "" {
+			writeJSON(w, http.StatusOK, fsListResponse{
+				Path:    "",
+				Parent:  "",
+				Roots:   slices.Clone(roots),
+				Entries: rootEntries(roots),
+			})
+			return
+		}
+		if !pathWithinAllowed(path, roots) {
+			http.Error(w, "path is outside allowed roots", http.StatusForbidden)
 			return
 		}
 		var response workbenchFilesResponse
@@ -1089,6 +1092,20 @@ func (s *Server) userFS(w http.ResponseWriter, r *http.Request) {
 			Roots:   slices.Clone(roots),
 			Entries: workbenchEntriesToFSEntries(response.Entries),
 		})
+		return
+	}
+
+	if path == "" {
+		writeJSON(w, http.StatusOK, fsListResponse{
+			Path:    "",
+			Parent:  "",
+			Roots:   slices.Clone(roots),
+			Entries: rootEntries(roots),
+		})
+		return
+	}
+	if !pathWithinAllowed(path, roots) {
+		http.Error(w, "path is outside allowed roots", http.StatusForbidden)
 		return
 	}
 
@@ -1368,7 +1385,7 @@ func cleanPaths(values []string) []string {
 	var cleaned []string
 	for _, value := range values {
 		value = config.NormalizePath(value)
-		if value != "" {
+		if value != "" && !slices.Contains(cleaned, value) {
 			cleaned = append(cleaned, value)
 		}
 	}

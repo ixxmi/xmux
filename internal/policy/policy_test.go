@@ -142,3 +142,24 @@ func TestDecideUsesGlobalAllowedPaths(t *testing.T) {
 		t.Fatalf("expected allow: %v", err)
 	}
 }
+
+func TestDecideCanRequirePathMatchWithNoAllowedPaths(t *testing.T) {
+	t.Parallel()
+
+	engine, err := NewEngine(Config{
+		RequirePathMatch: true,
+		Commands: map[string]CommandPolicy{
+			"cat": {Enabled: true},
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewEngine: %v", err)
+	}
+
+	if _, err := engine.Decide("cat", []string{"/tmp/app.log"}); err == nil {
+		t.Fatal("expected absolute path deny when path matching is required")
+	}
+	if _, err := engine.Decide("cat", []string{"relative.log"}); err != nil {
+		t.Fatalf("expected relative path allow: %v", err)
+	}
+}
