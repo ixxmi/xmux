@@ -257,7 +257,7 @@ func (h *tunnelHub) currentForAccount(account string) *tunnelClient {
 	if client := h.clients[account]; client != nil {
 		return client
 	}
-	if h.defaultAccount != "" && h.defaultAccount != account {
+	if account == "" && h.defaultAccount != "" {
 		return h.clients[h.defaultAccount]
 	}
 	return nil

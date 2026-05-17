@@ -370,6 +370,25 @@ func TestTunnelWorkbenchStateShowsAccountPathsWhenAgentOffline(t *testing.T) {
 	}
 }
 
+func TestTunnelHubDoesNotFallbackForSpecificAccount(t *testing.T) {
+	t.Parallel()
+
+	hub := newTunnelHub(slog.Default())
+	hub.setDefaultAccount("admin")
+	admin := &tunnelClient{hub: hub, account: "admin", edgeID: "edge-admin"}
+	hub.set(admin)
+
+	if got := hub.currentForAccount("admin"); got != admin {
+		t.Fatalf("admin client = %v, want admin client", got)
+	}
+	if got := hub.currentForAccount(""); got != admin {
+		t.Fatalf("default client = %v, want admin client", got)
+	}
+	if got := hub.currentForAccount("user@example.com"); got != nil {
+		t.Fatalf("user client = %+v, want nil instead of default admin client", got.info())
+	}
+}
+
 func TestTunnelWorkbenchFilesUsesAccountAllowPaths(t *testing.T) {
 	t.Parallel()
 
