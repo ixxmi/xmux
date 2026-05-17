@@ -37,7 +37,6 @@ func (r *tunnelRuntime) ResolveWorkbenchStart(opts workbenchStartOptions) (workb
 	}
 	info := client.info()
 	policyCfg := r.policyForAccount(opts.Account)
-	allowPaths := filterAllowedPaths(policyCfg.AllowPaths, info.allowPaths)
 
 	agentID := normalizeWorkbenchAgentID(opts.Agent)
 	var selected workbenchAgentInfo
@@ -56,19 +55,19 @@ func (r *tunnelRuntime) ResolveWorkbenchStart(opts workbenchStartOptions) (workb
 
 	workDir := config.NormalizePath(opts.WorkDir)
 	if workDir == "" {
-		workDir = defaultWorkbenchPath(info.workDir, allowPaths, policyCfg.RequirePathMatch)
+		workDir = defaultWorkbenchPath(info.workDir, policyCfg.AllowPaths, policyCfg.RequirePathMatch)
 	}
 	target := config.NormalizePath(opts.Target)
 	var args []string
 	if target != "" {
-		if !pathWithinAllowed(target, allowPaths) {
+		if !pathWithinAllowed(target, policyCfg.AllowPaths) {
 			return workbenchStartResolution{}, errors.New("target is outside local edge allowed roots")
 		}
-		if workDir == "" || !pathWithinAllowed(workDir, allowPaths) {
+		if workDir == "" || !pathWithinAllowed(workDir, policyCfg.AllowPaths) {
 			workDir = filepath.Dir(target)
 		}
 		args = []string{target}
-	} else if workDir != "" && !pathWithinAllowed(workDir, allowPaths) {
+	} else if workDir != "" && !pathWithinAllowed(workDir, policyCfg.AllowPaths) {
 		return workbenchStartResolution{}, errors.New("work_dir is outside local edge allowed roots")
 	}
 	if workDir == "" {

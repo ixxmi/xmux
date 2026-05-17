@@ -1527,22 +1527,25 @@ func (s *Server) workbenchFiles(w http.ResponseWriter, r *http.Request) {
 		policyCfg := s.policyForAccount(identity.Account, cfg.Policy)
 		requestedPath := config.NormalizePath(r.URL.Query().Get("path"))
 		info := client.info()
-		allowPaths := filterAllowedPaths(policyCfg.AllowPaths, info.allowPaths)
 		if requestedPath == "" {
-			requestedPath = defaultWorkbenchPath(info.workDir, allowPaths, policyCfg.RequirePathMatch)
+			requestedPath = defaultWorkbenchPath(info.workDir, policyCfg.AllowPaths, policyCfg.RequirePathMatch)
 		}
-		if !pathWithinAllowed(requestedPath, allowPaths) {
+		if !pathWithinAllowed(requestedPath, policyCfg.AllowPaths) {
 			http.Error(w, "path is outside allowed roots", http.StatusForbidden)
 			return
 		}
 		var response workbenchFilesResponse
-		if err := client.request(r.Context(), "files", tunnelFilesRequest{Path: requestedPath}, &response); err != nil {
+		if err := client.request(r.Context(), "files", tunnelFilesRequest{
+			Path:             requestedPath,
+			AllowPaths:       slices.Clone(policyCfg.AllowPaths),
+			RequirePathMatch: policyCfg.RequirePathMatch,
+		}, &response); err != nil {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
 		}
-		response.AllowPaths = allowPaths
-		response.Entries = filterWorkbenchFileEntriesToPolicy(response.Entries, allowPaths)
-		if response.Parent != "" && !pathWithinAllowed(response.Parent, allowPaths) {
+		response.AllowPaths = slices.Clone(policyCfg.AllowPaths)
+		response.Entries = filterWorkbenchFileEntriesToPolicy(response.Entries, policyCfg.AllowPaths)
+		if response.Parent != "" && !pathWithinAllowed(response.Parent, policyCfg.AllowPaths) {
 			response.Parent = ""
 		}
 		writeJSON(w, http.StatusOK, response)
@@ -1622,14 +1625,16 @@ func (s *Server) workbenchFile(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "path is required", http.StatusBadRequest)
 			return
 		}
-		info := client.info()
-		allowPaths := filterAllowedPaths(policyCfg.AllowPaths, info.allowPaths)
-		if !pathWithinAllowed(path, allowPaths) {
+		if !pathWithinAllowed(path, policyCfg.AllowPaths) {
 			http.Error(w, "path is outside allowed roots", http.StatusForbidden)
 			return
 		}
 		var response workbenchFileResponse
-		if err := client.request(r.Context(), "file", tunnelFileRequest{Path: path}, &response); err != nil {
+		if err := client.request(r.Context(), "file", tunnelFileRequest{
+			Path:             path,
+			AllowPaths:       slices.Clone(policyCfg.AllowPaths),
+			RequirePathMatch: policyCfg.RequirePathMatch,
+		}, &response); err != nil {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
 		}
@@ -1695,16 +1700,19 @@ func (s *Server) workbenchWarmup(w http.ResponseWriter, r *http.Request) {
 		policyCfg := s.policyForAccount(identity.Account, cfg.Policy)
 		path := config.NormalizePath(r.URL.Query().Get("path"))
 		info := client.info()
-		allowPaths := filterAllowedPaths(policyCfg.AllowPaths, info.allowPaths)
 		if path == "" {
-			path = defaultWorkbenchPath(info.workDir, allowPaths, policyCfg.RequirePathMatch)
+			path = defaultWorkbenchPath(info.workDir, policyCfg.AllowPaths, policyCfg.RequirePathMatch)
 		}
-		if !pathWithinAllowed(path, allowPaths) {
+		if !pathWithinAllowed(path, policyCfg.AllowPaths) {
 			http.Error(w, "path is outside allowed roots", http.StatusForbidden)
 			return
 		}
 		var response workbenchWarmupResponse
-		if err := client.request(r.Context(), "warmup", tunnelWarmupRequest{Path: path}, &response); err != nil {
+		if err := client.request(r.Context(), "warmup", tunnelWarmupRequest{
+			Path:             path,
+			AllowPaths:       slices.Clone(policyCfg.AllowPaths),
+			RequirePathMatch: policyCfg.RequirePathMatch,
+		}, &response); err != nil {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
 		}
@@ -1755,16 +1763,15 @@ func (s *Server) workbenchDiff(w http.ResponseWriter, r *http.Request) {
 		workDir := config.NormalizePath(r.URL.Query().Get("work_dir"))
 		path := config.NormalizePath(r.URL.Query().Get("path"))
 		info := client.info()
-		allowPaths := filterAllowedPaths(policyCfg.AllowPaths, info.allowPaths)
 		if workDir == "" {
-			workDir = defaultWorkbenchPath(info.workDir, allowPaths, policyCfg.RequirePathMatch)
+			workDir = defaultWorkbenchPath(info.workDir, policyCfg.AllowPaths, policyCfg.RequirePathMatch)
 		}
-		if !pathWithinAllowed(workDir, allowPaths) {
+		if !pathWithinAllowed(workDir, policyCfg.AllowPaths) {
 			http.Error(w, "work_dir is outside allowed roots", http.StatusForbidden)
 			return
 		}
 		if path != "" {
-			if !pathWithinAllowed(path, allowPaths) {
+			if !pathWithinAllowed(path, policyCfg.AllowPaths) {
 				http.Error(w, "path is outside allowed roots", http.StatusForbidden)
 				return
 			}
@@ -1776,8 +1783,10 @@ func (s *Server) workbenchDiff(w http.ResponseWriter, r *http.Request) {
 		}
 		var response workbenchDiffResponse
 		if err := client.request(r.Context(), "diff", tunnelDiffRequest{
-			WorkDir: workDir,
-			Path:    path,
+			WorkDir:          workDir,
+			Path:             path,
+			AllowPaths:       slices.Clone(policyCfg.AllowPaths),
+			RequirePathMatch: policyCfg.RequirePathMatch,
 		}, &response); err != nil {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return

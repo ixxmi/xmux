@@ -356,28 +356,28 @@ func (a *Agent) handle(ctx context.Context, client *clientConn, env gateway.Tunn
 		if !decodeAndRespond(client, env, &req) {
 			return
 		}
-		out, err := a.files(req.Path)
+		out, err := a.files(req.Path, req.AllowPaths, req.RequirePathMatch)
 		respond(client, env.ID, err, out)
 	case "file":
 		var req gateway.TunnelFileRequest
 		if !decodeAndRespond(client, env, &req) {
 			return
 		}
-		out, err := a.file(req.Path)
+		out, err := a.file(req.Path, req.AllowPaths, req.RequirePathMatch)
 		respond(client, env.ID, err, out)
 	case "warmup":
 		var req gateway.TunnelWarmupRequest
 		if !decodeAndRespond(client, env, &req) {
 			return
 		}
-		out, err := a.warmup(ctx, req.Path)
+		out, err := a.warmup(ctx, req.Path, req.AllowPaths, req.RequirePathMatch)
 		respond(client, env.ID, err, out)
 	case "diff":
 		var req gateway.TunnelDiffRequest
 		if !decodeAndRespond(client, env, &req) {
 			return
 		}
-		out, err := a.diff(ctx, req.WorkDir, req.Path)
+		out, err := a.diff(ctx, req.WorkDir, req.Path, req.AllowPaths, req.RequirePathMatch)
 		respond(client, env.ID, err, out)
 	default:
 		respond(client, env.ID, fmt.Errorf("unsupported tunnel request %q", env.Type), nil)
@@ -585,16 +585,13 @@ func (a *Agent) resolveStartTarget(workDir string, target string, args []string,
 func effectiveAllowedPaths(local []string, account []string, requirePathMatch bool) []string {
 	local = cleanAgentPaths(local)
 	account = cleanAgentPaths(account)
-	if len(account) == 0 && !requirePathMatch {
+	if len(account) > 0 {
+		return account
+	}
+	if !requirePathMatch {
 		return local
 	}
-	var out []string
-	for _, path := range account {
-		if pathAllowed(path, local) && !slices.Contains(out, path) {
-			out = append(out, path)
-		}
-	}
-	return out
+	return nil
 }
 
 func cleanAgentPaths(values []string) []string {
@@ -644,13 +641,14 @@ func (a *Agent) sessionInfos() []gateway.WorkbenchSessionInfo {
 	return items
 }
 
-func (a *Agent) files(path string) (gateway.WorkbenchFilesResponse, error) {
+func (a *Agent) files(path string, allowPaths []string, requirePathMatch bool) (gateway.WorkbenchFilesResponse, error) {
 	cfg := a.config.Snapshot()
+	allowed := effectiveAllowedPaths(cfg.Policy.AllowPaths, allowPaths, requirePathMatch)
 	path = config.NormalizePath(path)
 	if path == "" {
 		path = config.NormalizePath(cfg.Edge.WorkDir)
 	}
-	if !pathAllowed(path, cfg.Policy.AllowPaths) {
+	if !pathAllowed(path, allowed) {
 		return gateway.WorkbenchFilesResponse{}, errors.New("path is outside allowed roots")
 	}
 	entries, err := os.ReadDir(path)
@@ -681,24 +679,25 @@ func (a *Agent) files(path string) (gateway.WorkbenchFilesResponse, error) {
 		return strings.Compare(strings.ToLower(a.Name), strings.ToLower(b.Name))
 	})
 	parent := filepath.Dir(path)
-	if parent == path || !pathAllowed(parent, cfg.Policy.AllowPaths) {
+	if parent == path || !pathAllowed(parent, allowed) {
 		parent = ""
 	}
 	return gateway.WorkbenchFilesResponse{
 		Path:       path,
 		Parent:     parent,
-		AllowPaths: slices.Clone(cfg.Policy.AllowPaths),
+		AllowPaths: slices.Clone(allowed),
 		Entries:    items,
 	}, nil
 }
 
-func (a *Agent) file(path string) (gateway.WorkbenchFileResponse, error) {
+func (a *Agent) file(path string, allowPaths []string, requirePathMatch bool) (gateway.WorkbenchFileResponse, error) {
 	cfg := a.config.Snapshot()
+	allowed := effectiveAllowedPaths(cfg.Policy.AllowPaths, allowPaths, requirePathMatch)
 	path = config.NormalizePath(path)
 	if path == "" {
 		return gateway.WorkbenchFileResponse{}, errors.New("path is required")
 	}
-	if !pathAllowed(path, cfg.Policy.AllowPaths) {
+	if !pathAllowed(path, allowed) {
 		return gateway.WorkbenchFileResponse{}, errors.New("path is outside allowed roots")
 	}
 	info, err := os.Stat(path)
@@ -720,13 +719,14 @@ func (a *Agent) file(path string) (gateway.WorkbenchFileResponse, error) {
 	return gateway.WorkbenchFileResponse{Path: path, Name: filepath.Base(path), Content: string(content), Size: info.Size(), Truncated: truncated}, nil
 }
 
-func (a *Agent) warmup(ctx context.Context, path string) (gateway.WorkbenchWarmupResponse, error) {
+func (a *Agent) warmup(ctx context.Context, path string, allowPaths []string, requirePathMatch bool) (gateway.WorkbenchWarmupResponse, error) {
 	cfg := a.config.Snapshot()
+	allowed := effectiveAllowedPaths(cfg.Policy.AllowPaths, allowPaths, requirePathMatch)
 	root := config.NormalizePath(path)
 	if root == "" {
 		root = config.NormalizePath(cfg.Edge.WorkDir)
 	}
-	if !pathAllowed(root, cfg.Policy.AllowPaths) {
+	if !pathAllowed(root, allowed) {
 		return gateway.WorkbenchWarmupResponse{}, errors.New("path is outside allowed roots")
 	}
 	info, err := os.Stat(root)
@@ -762,19 +762,20 @@ func (a *Agent) warmup(ctx context.Context, path string) (gateway.WorkbenchWarmu
 	return response, nil
 }
 
-func (a *Agent) diff(ctx context.Context, workDir string, path string) (gateway.WorkbenchDiffResponse, error) {
+func (a *Agent) diff(ctx context.Context, workDir string, path string, allowPaths []string, requirePathMatch bool) (gateway.WorkbenchDiffResponse, error) {
 	cfg := a.config.Snapshot()
+	allowed := effectiveAllowedPaths(cfg.Policy.AllowPaths, allowPaths, requirePathMatch)
 	workDir = config.NormalizePath(workDir)
 	if workDir == "" {
 		workDir = config.NormalizePath(cfg.Edge.WorkDir)
 	}
-	if !pathAllowed(workDir, cfg.Policy.AllowPaths) {
+	if !pathAllowed(workDir, allowed) {
 		return gateway.WorkbenchDiffResponse{}, errors.New("work_dir is outside allowed roots")
 	}
 	args := []string{"diff", "--"}
 	if strings.TrimSpace(path) != "" {
 		path = config.NormalizePath(path)
-		if !pathAllowed(path, cfg.Policy.AllowPaths) {
+		if !pathAllowed(path, allowed) {
 			return gateway.WorkbenchDiffResponse{}, errors.New("path is outside allowed roots")
 		}
 		rel, err := filepath.Rel(workDir, path)

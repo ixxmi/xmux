@@ -921,7 +921,7 @@
       return;
     }
     for (const root of roots) {
-      folderPickerList.appendChild(folderPickerRow(root, true, !pathAvailableOnEdge(root)));
+      folderPickerList.appendChild(folderPickerRow(root, true));
     }
   }
 
@@ -1023,8 +1023,7 @@
         name: root,
         path: root,
         is_dir: true,
-        size: 0,
-        unavailable: !pathAvailableOnEdge(root)
+        size: 0
       }, false));
     }
   }
@@ -1038,15 +1037,11 @@
       <span class="file-icon">${entry.is_dir ? folderIcon() : fileIcon()}</span>
       <span class="file-name">${escapeHTML(currentDir ? "当前目录" : entry.name)}</span>
       <span class="file-actions">
-        ${entry.unavailable ? '<span class="choose-label">等待同步</span>' : entry.is_dir && !currentDir ? '<span class="open-dir">进入</span>' : ""}
-        <span class="choose-label">${entry.unavailable ? "不可用" : isSelected ? "已选择" : "启动"}</span>
+        ${entry.is_dir && !currentDir ? '<span class="open-dir">进入</span>' : ""}
+        <span class="choose-label">${isSelected ? "已选择" : "启动"}</span>
       </span>
     `;
     button.addEventListener("click", (event) => {
-      if (entry.unavailable) {
-        targetSelection.textContent = "该路径已保存到云端，等待本地客户端同步后可使用";
-        return;
-      }
       const action = event.target.closest(".open-dir");
       if (action && entry.is_dir) {
         loadTargetFiles(entry.path);
@@ -1087,11 +1082,6 @@
     }
     if (!selectedTarget.workDir) {
       targetSelection.textContent = "请先在用户后台配置允许访问路径";
-      startAgentButton.disabled = true;
-      return;
-    }
-    if (!pathAvailableOnEdge(selectedTarget.workDir)) {
-      targetSelection.textContent = "该路径已保存到云端，等待本地客户端同步后可使用";
       startAgentButton.disabled = true;
       return;
     }
@@ -1803,14 +1793,9 @@
       button.innerHTML = `
         <span class="file-icon">${folderIcon()}</span>
         <span class="file-name">${escapeHTML(shortenPath(root))}</span>
-        <span class="file-meta">${pathAvailableOnEdge(root) ? "Root" : "等待同步"}</span>
+        <span class="file-meta">Root</span>
       `;
-      button.disabled = !pathAvailableOnEdge(root);
-      button.addEventListener("click", () => {
-        if (pathAvailableOnEdge(root)) {
-          loadFiles(root);
-        }
-      });
+      button.addEventListener("click", () => loadFiles(root));
       fileList.appendChild(button);
     }
   }
@@ -2295,26 +2280,6 @@
   function pathAllowedByState(path) {
     path = String(path || "");
     const roots = Array.isArray(state?.allow_paths) ? state.allow_paths : [];
-    return roots.some((root) => {
-      root = String(root || "");
-      if (!root) {
-        return false;
-      }
-      const normalized = root.replace(/\/+$/, "") || "/";
-      return path === root || path === normalized || (normalized !== "/" && path.startsWith(normalized + "/"));
-    });
-  }
-
-  function pathAvailableOnEdge(path) {
-    const roots = Array.isArray(state?.edge_allow_paths) ? state.edge_allow_paths : state?.allow_paths;
-    return pathAllowedByRoots(path, roots);
-  }
-
-  function pathAllowedByRoots(path, roots) {
-    path = String(path || "");
-    if (!Array.isArray(roots)) {
-      return false;
-    }
     return roots.some((root) => {
       root = String(root || "");
       if (!root) {

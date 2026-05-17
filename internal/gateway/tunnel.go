@@ -138,33 +138,47 @@ type tunnelSessionExit struct {
 type TunnelSessionExit = tunnelSessionExit
 
 type tunnelFilesRequest struct {
-	Path string `json:"path"`
+	Path             string   `json:"path"`
+	AllowPaths       []string `json:"allow_paths,omitempty"`
+	RequirePathMatch bool     `json:"require_path_match,omitempty"`
 }
 
 type TunnelFilesRequest = tunnelFilesRequest
 
 type tunnelWarmupRequest struct {
-	Path string `json:"path"`
+	Path             string   `json:"path"`
+	AllowPaths       []string `json:"allow_paths,omitempty"`
+	RequirePathMatch bool     `json:"require_path_match,omitempty"`
 }
 
 type TunnelWarmupRequest = tunnelWarmupRequest
 
 type tunnelFileRequest struct {
-	Path string `json:"path"`
+	Path             string   `json:"path"`
+	AllowPaths       []string `json:"allow_paths,omitempty"`
+	RequirePathMatch bool     `json:"require_path_match,omitempty"`
 }
 
 type TunnelFileRequest = tunnelFileRequest
 
 type tunnelDiffRequest struct {
-	WorkDir string `json:"work_dir"`
-	Path    string `json:"path,omitempty"`
+	WorkDir          string   `json:"work_dir"`
+	Path             string   `json:"path,omitempty"`
+	AllowPaths       []string `json:"allow_paths,omitempty"`
+	RequirePathMatch bool     `json:"require_path_match,omitempty"`
 }
 
 type TunnelDiffRequest = tunnelDiffRequest
 
+type tunnelConn interface {
+	ReadJSON(any) error
+	WriteJSON(any) error
+	Close() error
+}
+
 type tunnelClient struct {
 	hub    *tunnelHub
-	conn   *websocket.Conn
+	conn   tunnelConn
 	logger *slog.Logger
 
 	mu           sync.Mutex

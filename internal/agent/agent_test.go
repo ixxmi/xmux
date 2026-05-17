@@ -18,6 +18,10 @@ func TestEffectiveAllowedPathsRequiresAccountPaths(t *testing.T) {
 		t.Fatalf("with account requirement = %v, want empty", got)
 	}
 	if got := effectiveAllowedPaths([]string{root}, []string{allowed}, true); len(got) != 1 || got[0] != allowed {
-		t.Fatalf("account path intersection = %v, want %s", got, allowed)
+		t.Fatalf("account path = %v, want %s", got, allowed)
+	}
+	remoteOnly := filepath.Join(t.TempDir(), "remote")
+	if got := effectiveAllowedPaths([]string{root}, []string{remoteOnly}, true); len(got) != 1 || got[0] != remoteOnly {
+		t.Fatalf("remote account path = %v, want %s", got, remoteOnly)
 	}
 }

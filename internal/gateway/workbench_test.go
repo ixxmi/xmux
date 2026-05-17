@@ -1,8 +1,10 @@
 package gateway
 
 import (
+	"encoding/json"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -12,6 +14,38 @@ import (
 	"cloud-terminal/internal/config"
 	"cloud-terminal/internal/policy"
 )
+
+type tunnelRoundTripConn struct {
+	handler func(tunnelEnvelope) tunnelEnvelope
+	writes  chan tunnelEnvelope
+}
+
+func newTunnelRoundTripConn(handler func(tunnelEnvelope) tunnelEnvelope) *tunnelRoundTripConn {
+	return &tunnelRoundTripConn{handler: handler, writes: make(chan tunnelEnvelope, 8)}
+}
+
+func (c *tunnelRoundTripConn) WriteJSON(env any) error {
+	req := env.(tunnelEnvelope)
+	response := c.handler(req)
+	if response.Type == "" {
+		response.Type = "response"
+	}
+	if response.ID == "" {
+		response.ID = req.ID
+	}
+	c.writes <- response
+	return nil
+}
+
+func (c *tunnelRoundTripConn) Close() error {
+	close(c.writes)
+	return nil
+}
+
+func (c *tunnelRoundTripConn) ReadJSON(any) error {
+	<-make(chan struct{})
+	return nil
+}
 
 func TestWorkbenchAuthorizedUsesCookie(t *testing.T) {
 	t.Parallel()
@@ -333,6 +367,102 @@ func TestTunnelWorkbenchStateShowsAccountPathsWhenAgentOffline(t *testing.T) {
 	}
 	if len(state.EdgePaths) != 0 {
 		t.Fatalf("EdgePaths = %v, want empty while agent is offline", state.EdgePaths)
+	}
+}
+
+func TestTunnelWorkbenchFilesUsesAccountAllowPaths(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	accountPath := filepath.Join(root, "account")
+	agentPath := filepath.Join(root, "agent")
+	if err := os.MkdirAll(filepath.Join(accountPath, "src"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(agentPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	server := NewServer(Options{
+		Config: config.NewStore(filepath.Join(t.TempDir(), "policy.yaml"), &config.Config{
+			Server: config.ServerConfig{
+				DatabasePath:               filepath.Join(t.TempDir(), "xmux.db"),
+				AccountRegistrationEnabled: testBoolPtr(true),
+			},
+			Policy: policy.Config{
+				AllowPaths: []string{root},
+				Commands:   map[string]policy.CommandPolicy{"codex": {Enabled: true, Interactive: true}},
+			},
+		}),
+	})
+	cookies := registerTestAccount(t, server, "user@example.com", "secret123")
+	if _, err := server.accountStore().SaveUserSettings("user@example.com", userSettingsUpdatePayload{
+		CloudTunnelEnabled: true,
+		AllowPaths:         []string{accountPath},
+		Commands:           map[string]adminCommandPayload{"codex": {Enabled: true, Interactive: true}},
+	}, server.config.Snapshot().Policy); err != nil {
+		t.Fatalf("save user settings: %v", err)
+	}
+	conn := newTunnelRoundTripConn(func(env tunnelEnvelope) tunnelEnvelope {
+		if env.Type != "files" {
+			return tunnelEnvelope{OK: false, Error: "unexpected request"}
+		}
+		var req tunnelFilesRequest
+		if err := decodeTunnelPayload(env.Payload, &req); err != nil {
+			return tunnelEnvelope{OK: false, Error: err.Error()}
+		}
+		if req.Path != accountPath {
+			return tunnelEnvelope{OK: false, Error: "wrong path"}
+		}
+		if len(req.AllowPaths) != 1 || req.AllowPaths[0] != accountPath {
+			return tunnelEnvelope{OK: false, Error: "missing account allow paths"}
+		}
+		payload, err := encodeTunnelPayload(workbenchFilesResponse{
+			Path:       accountPath,
+			AllowPaths: []string{accountPath},
+			Entries: []workbenchFileEntry{
+				{Name: "src", Path: filepath.Join(accountPath, "src"), IsDir: true},
+				{Name: "agent", Path: agentPath, IsDir: true},
+			},
+		})
+		if err != nil {
+			return tunnelEnvelope{OK: false, Error: err.Error()}
+		}
+		return tunnelEnvelope{OK: true, Payload: payload}
+	})
+	client := &tunnelClient{
+		hub:        server.tunnel,
+		conn:       conn,
+		logger:     slog.Default(),
+		account:    "user@example.com",
+		edgeID:     "edge-user",
+		edgeName:   "User Edge",
+		workDir:    agentPath,
+		allowPaths: []string{agentPath},
+		agents:     []workbenchAgentInfo{{ID: "codex", Label: "Codex", Command: "codex", Enabled: true}},
+		pending:    make(map[string]chan tunnelEnvelope),
+	}
+	server.tunnel.set(client)
+	go func() {
+		for env := range conn.writes {
+			client.handle(env)
+		}
+	}()
+
+	req := httptest.NewRequest(http.MethodGet, "/cloud-terminal-api/workbench/files?path="+url.QueryEscape(accountPath), nil)
+	for _, cookie := range cookies {
+		req.AddCookie(cookie)
+	}
+	resp := httptest.NewRecorder()
+	server.Routes().ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("files status = %d body = %s", resp.Code, resp.Body.String())
+	}
+	var out workbenchFilesResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatalf("decode files: %v", err)
+	}
+	if len(out.Entries) != 1 || out.Entries[0].Path != filepath.Join(accountPath, "src") {
+		t.Fatalf("entries = %+v, want only account path child", out.Entries)
 	}
 }
 
