@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>xmux Agent</title>
+    <link rel="stylesheet" href="/agent/styles.css" />
+  </head>
+  <body>
+    <main class="agent-layout">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark">xm</div>
+          <div>
+            <span>xmux</span>
+            <strong>Agent 管理</strong>
+          </div>
+        </div>
+        <nav class="nav">
+          <button class="nav-item active" type="button" data-section="tunnel">穿透配置</button>
+          <button class="nav-item" type="button" data-section="access">访问策略</button>
+          <button class="nav-item" type="button" data-section="paths">文件路径</button>
+          <button class="nav-item" type="button" data-section="account">账号信息</button>
+        </nav>
+        <div class="sidebar-footer">
+          <span id="saveState">Loaded</span>
+        </div>
+      </aside>
+
+      <section class="content">
+        <header class="content-header">
+          <p id="sectionEyebrow" class="section-eyebrow">穿透配置</p>
+          <div class="header-meta">
+            <div class="account-menu" id="accountMenu">
+              <button id="accountTrigger" class="account-trigger" type="button" aria-haspopup="true" aria-expanded="false">
+                <span id="accountAvatar" class="account-avatar">--</span>
+              </button>
+              <div id="accountDropdown" class="account-dropdown" hidden>
+                <div class="account-info">
+                  <span class="account-name" id="accountName">-</span>
+                  <span class="account-role" id="accountRole">-</span>
+                </div>
+                <button id="logoutButton" class="account-item danger" type="button">退出登录</button>
+              </div>
+            </div>
+          </div>
+        </header>
+
+        <!-- 穿透配置 -->
+        <section class="section active" id="section-tunnel">
+          <div class="section-grid two">
+            <article class="panel">
+              <h2>连接设置</h2>
+              <label class="check standalone">
+                <input id="tunnelEnabled" type="checkbox" />
+                启用反向穿透（连接云端网关）
+              </label>
+              <label>Discovery URL<input id="discoveryURL" placeholder="https://cloud.example.com:5955" /></label>
+              <label>Gateway URL（兜底）<input id="gatewayURL" placeholder="可选，discovery 失败时使用" /></label>
+              <button id="saveTunnelButton" type="button">保存本地配置</button>
+              <p id="tunnelMessage" class="field-message"></p>
+            </article>
+            <article class="panel">
+              <h2>Edge 身份</h2>
+              <label>Edge ID<input id="edgeID" placeholder="macbook-pro" /></label>
+              <label>Edge 名称<input id="edgeName" placeholder="MacBook Pro" /></label>
+              <label>工作目录<input id="workDir" readonly /></label>
+            </article>
+          </div>
+        </section>
+
+        <!-- 访问策略（来自云端） -->
+        <section class="section" id="section-access">
+          <div class="section-grid two">
+            <article class="panel">
+              <h2>命令策略</h2>
+              <p class="muted">策略上限由云端管理员控制，此处只能在上限内调整。</p>
+              <div class="panel-toolbar">
+                <span></span>
+                <button id="enableAllCommands" class="secondary" type="button">全部启用</button>
+              </div>
+              <div id="commandList" class="command-list"></div>
+            </article>
+            <article class="panel">
+              <h2>策略边界</h2>
+              <div id="policySummary" class="summary-grid"></div>
+            </article>
+          </div>
+        </section>
+
+        <!-- 文件路径（云端记录+本地浏览） -->
+        <section class="section" id="section-paths">
+          <div class="path-layout">
+            <article class="panel path-browser-panel">
+              <div class="panel-toolbar path-panel-title">
+                <h2>本地文件路径</h2>
+                <span id="fileCount" class="path-count">0 项</span>
+              </div>
+              <div class="pathbar">
+                <button id="rootButton" class="secondary" type="button">Root</button>
+                <button id="upButton" class="secondary" type="button">Up</button>
+                <span id="currentPath"></span>
+              </div>
+              <div id="fileList" class="file-list"></div>
+            </article>
+            <article class="panel">
+              <h2>全局可访问路径</h2>
+              <p class="muted">保存后同步到云端账号设置，用于终端、移动端文件菜单。</p>
+              <textarea id="globalAllowPaths" rows="16" spellcheck="false"></textarea>
+            </article>
+          </div>
+        </section>
+
+        <!-- 账号信息 -->
+        <section class="section" id="section-account">
+          <div class="section-grid two">
+            <article class="panel">
+              <h2>当前账号</h2>
+              <label>用户名<input id="profileUsername" readonly /></label>
+              <label>角色<input id="profileRole" readonly /></label>
+            </article>
+            <article class="panel">
+              <h2>修改密码</h2>
+              <label>当前密码<input id="currentPassword" type="password" autocomplete="current-password" /></label>
+              <label>新密码<input id="newPassword" type="password" autocomplete="new-password" placeholder="至少 8 位" /></label>
+              <button id="saveProfileButton" type="button">保存密码</button>
+              <p id="profileMessage" class="field-message"></p>
+            </article>
+          </div>
+        </section>
+
+        <footer class="savebar" id="cloudSavebar" hidden>
+          <button id="saveCloudButton" type="button">同步策略到云端</button>
+        </footer>
+      </section>
+    </main>
+
+    <script src="/agent/app.js"></script>
+  </body>
+</html>

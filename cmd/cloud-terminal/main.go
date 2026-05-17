@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -81,9 +82,16 @@ func main() {
 			WorkbenchStatePath: cfg.Server.WorkbenchStatePath,
 			Logger:             logger,
 		})
+
+		// Resolve the cloud base URL from discovery_url or gateway_url
+		cloudBase := strings.TrimSpace(cloudTunnel.DiscoveryURL)
+		if cloudBase == "" {
+			cloudBase = strings.TrimSpace(cloudTunnel.GatewayURL)
+		}
+
 		httpServer := &http.Server{
 			Addr:              cfg.Server.Addr,
-			Handler:           srv.Routes(),
+			Handler:           srv.AgentRoutes(cloudBase),
 			ReadHeaderTimeout: 5 * time.Second,
 		}
 		go func() {

@@ -1,0 +1,119 @@
+/* Agent admin uses the same design language as admin */
+@import url("/admin/styles.css");
+
+/* Savebar at bottom of content */
+.savebar {
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  justify-content: flex-end;
+  padding: 12px 0 0;
+  background: transparent;
+}
+
+.savebar button {
+  min-width: 160px;
+  box-shadow: 0 10px 24px rgba(173, 98, 56, 0.22);
+}
+
+/* Summary grid */
+.summary-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+}
+
+.summary-grid div {
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.summary-grid span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+
+.summary-grid strong {
+  color: var(--text);
+  font-size: 22px;
+}
+
+/* Command list */
+.command-list {
+  display: grid;
+  gap: 8px;
+  max-height: 340px;
+  overflow-y: auto;
+}
+
+.command-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 40px;
+  padding: 0 10px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: var(--panel-soft);
+  cursor: pointer;
+}
+
+.command-row input {
+  width: 16px;
+  min-height: 0;
+  flex: 0 0 auto;
+}
+
+.command-row strong {
+  display: block;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.command-row small {
+  display: block;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+/* Field message */
+.field-message {
+  min-height: 18px;
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.field-message.ok   { color: var(--cool); }
+.field-message.error { color: var(--danger); }
+
+/* Cloud hint on login */
+.cloud-hint {
+  min-height: 20px;
+  margin: -6px 0 6px;
+  color: var(--muted);
+  font-size: 12px;
+  text-align: center;
+}
+
+/* Muted helper */
+.muted {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.6;
+  margin: 0;
+}
+
+.agent-layout {
+  min-height: 100vh;
+  display: grid;
+  grid-template-columns: 280px minmax(0, 1fr);
+}

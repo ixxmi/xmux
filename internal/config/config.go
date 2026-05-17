@@ -268,7 +268,32 @@ func (s *Store) Update(next Config) error {
 	if _, err := policy.NewEngine(next.Policy); err != nil {
 		return err
 	}
+	return s.writeConfig(next)
+}
 
+// UpdateTunnel persists tunnel/edge connection fields only,
+// leaving policy unchanged. Used by agent-mode admin.
+func (s *Store) UpdateTunnel(tunnelEnabled bool, discoveryURL, gatewayURL, edgeName, edgeID string) error {
+	s.mu.Lock()
+	next := cloneConfig(s.cfg)
+	s.mu.Unlock()
+	next.CloudTunnel.Enabled = tunnelEnabled
+	if strings.TrimSpace(discoveryURL) != "" {
+		next.CloudTunnel.DiscoveryURL = strings.TrimSpace(discoveryURL)
+	}
+	if strings.TrimSpace(gatewayURL) != "" {
+		next.CloudTunnel.GatewayURL = strings.TrimSpace(gatewayURL)
+	}
+	if strings.TrimSpace(edgeName) != "" {
+		next.Edge.Name = strings.TrimSpace(edgeName)
+	}
+	if strings.TrimSpace(edgeID) != "" {
+		next.Edge.ID = strings.TrimSpace(edgeID)
+	}
+	return s.writeConfig(next)
+}
+
+func (s *Store) writeConfig(next Config) error {
 	content, err := yaml.Marshal(next)
 	if err != nil {
 		return err
@@ -279,7 +304,6 @@ func (s *Store) Update(next Config) error {
 	if err := os.WriteFile(s.path, content, 0o600); err != nil {
 		return err
 	}
-
 	s.mu.Lock()
 	s.cfg = next
 	s.mu.Unlock()
