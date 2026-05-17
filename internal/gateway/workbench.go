@@ -512,7 +512,7 @@ func resolveWorkbenchTarget(cfg config.Config, requestedWorkDir string, requeste
 func resolveWorkbenchTargetWithPolicy(cfg config.Config, policyCfg policy.Config, requestedWorkDir string, requestedTarget string) (string, []string, error) {
 	workDir := config.NormalizePath(requestedWorkDir)
 	if workDir == "" {
-		workDir = config.NormalizePath(cfg.Edge.WorkDir)
+		workDir = defaultWorkbenchPath(cfg.Edge.WorkDir, policyCfg.AllowPaths, policyCfg.RequirePathMatch)
 	}
 	target := config.NormalizePath(requestedTarget)
 	if target != "" {
@@ -1203,7 +1203,7 @@ func (s *Server) workbenchStatePayload(account string) workbenchStatePayload {
 		}
 		info := client.info()
 		allowPaths := filterAllowedPaths(policyCfg.AllowPaths, info.allowPaths)
-		workDir := firstAllowedPath(info.workDir, allowPaths)
+		workDir := defaultWorkbenchPath(info.workDir, allowPaths, policyCfg.RequirePathMatch)
 		return workbenchStatePayload{
 			EdgeID:       info.edgeID,
 			EdgeName:     info.edgeName,
@@ -1221,7 +1221,7 @@ func (s *Server) workbenchStatePayload(account string) workbenchStatePayload {
 		EdgeName:     s.edgeName,
 		EdgeOnline:   true,
 		Tunnel:       false,
-		WorkDir:      config.NormalizePath(cfg.Edge.WorkDir),
+		WorkDir:      defaultWorkbenchPath(cfg.Edge.WorkDir, policyCfg.AllowPaths, policyCfg.RequirePathMatch),
 		AllowPaths:   slices.Clone(policyCfg.AllowPaths),
 		PreviewPorts: slices.Clone(cfg.Edge.PreviewPorts),
 		Agents:       listWorkbenchAgentsForPolicy(policyCfg),
@@ -1339,6 +1339,22 @@ func firstAllowedPath(preferred string, allowPaths []string) string {
 		}
 	}
 	return ""
+}
+
+func defaultWorkbenchPath(preferred string, allowPaths []string, requirePathMatch bool) string {
+	if requirePathMatch {
+		for _, path := range allowPaths {
+			path = config.NormalizePath(path)
+			if path != "" {
+				return path
+			}
+		}
+		return ""
+	}
+	if path := firstAllowedPath(preferred, allowPaths); path != "" {
+		return path
+	}
+	return config.NormalizePath(preferred)
 }
 
 func (s *Server) workbenchWS(w http.ResponseWriter, r *http.Request) {
@@ -1488,7 +1504,7 @@ func (s *Server) workbenchFiles(w http.ResponseWriter, r *http.Request) {
 		info := client.info()
 		allowPaths := filterAllowedPaths(policyCfg.AllowPaths, info.allowPaths)
 		if requestedPath == "" {
-			requestedPath = firstAllowedPath(info.workDir, allowPaths)
+			requestedPath = defaultWorkbenchPath(info.workDir, allowPaths, policyCfg.RequirePathMatch)
 		}
 		if !pathWithinAllowed(requestedPath, allowPaths) {
 			http.Error(w, "path is outside allowed roots", http.StatusForbidden)
@@ -1512,7 +1528,7 @@ func (s *Server) workbenchFiles(w http.ResponseWriter, r *http.Request) {
 	policyCfg := s.policyForAccount(identity.Account, cfg.Policy)
 	path := config.NormalizePath(r.URL.Query().Get("path"))
 	if path == "" {
-		path = config.NormalizePath(cfg.Edge.WorkDir)
+		path = defaultWorkbenchPath(cfg.Edge.WorkDir, policyCfg.AllowPaths, policyCfg.RequirePathMatch)
 	}
 	if !pathWithinAllowed(path, policyCfg.AllowPaths) {
 		http.Error(w, "path is outside allowed roots", http.StatusForbidden)
@@ -1656,7 +1672,7 @@ func (s *Server) workbenchWarmup(w http.ResponseWriter, r *http.Request) {
 		info := client.info()
 		allowPaths := filterAllowedPaths(policyCfg.AllowPaths, info.allowPaths)
 		if path == "" {
-			path = firstAllowedPath(info.workDir, allowPaths)
+			path = defaultWorkbenchPath(info.workDir, allowPaths, policyCfg.RequirePathMatch)
 		}
 		if !pathWithinAllowed(path, allowPaths) {
 			http.Error(w, "path is outside allowed roots", http.StatusForbidden)
@@ -1675,7 +1691,7 @@ func (s *Server) workbenchWarmup(w http.ResponseWriter, r *http.Request) {
 	policyCfg := s.policyForAccount(identity.Account, cfg.Policy)
 	root := config.NormalizePath(r.URL.Query().Get("path"))
 	if root == "" {
-		root = config.NormalizePath(cfg.Edge.WorkDir)
+		root = defaultWorkbenchPath(cfg.Edge.WorkDir, policyCfg.AllowPaths, policyCfg.RequirePathMatch)
 	}
 	if !pathWithinAllowed(root, policyCfg.AllowPaths) {
 		http.Error(w, "path is outside allowed roots", http.StatusForbidden)
@@ -1716,7 +1732,7 @@ func (s *Server) workbenchDiff(w http.ResponseWriter, r *http.Request) {
 		info := client.info()
 		allowPaths := filterAllowedPaths(policyCfg.AllowPaths, info.allowPaths)
 		if workDir == "" {
-			workDir = firstAllowedPath(info.workDir, allowPaths)
+			workDir = defaultWorkbenchPath(info.workDir, allowPaths, policyCfg.RequirePathMatch)
 		}
 		if !pathWithinAllowed(workDir, allowPaths) {
 			http.Error(w, "work_dir is outside allowed roots", http.StatusForbidden)
@@ -1749,7 +1765,7 @@ func (s *Server) workbenchDiff(w http.ResponseWriter, r *http.Request) {
 	policyCfg := s.policyForAccount(identity.Account, cfg.Policy)
 	workDir := config.NormalizePath(r.URL.Query().Get("work_dir"))
 	if workDir == "" {
-		workDir = config.NormalizePath(cfg.Edge.WorkDir)
+		workDir = defaultWorkbenchPath(cfg.Edge.WorkDir, policyCfg.AllowPaths, policyCfg.RequirePathMatch)
 	}
 	if !pathWithinAllowed(workDir, policyCfg.AllowPaths) {
 		http.Error(w, "work_dir is outside allowed roots", http.StatusForbidden)

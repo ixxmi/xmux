@@ -56,7 +56,7 @@ func (r *tunnelRuntime) ResolveWorkbenchStart(opts workbenchStartOptions) (workb
 
 	workDir := config.NormalizePath(opts.WorkDir)
 	if workDir == "" {
-		workDir = config.NormalizePath(info.workDir)
+		workDir = defaultWorkbenchPath(info.workDir, allowPaths, policyCfg.RequirePathMatch)
 	}
 	target := config.NormalizePath(opts.Target)
 	var args []string

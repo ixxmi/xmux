@@ -280,7 +280,7 @@ func TestTunnelResolveStartUsesUserPolicy(t *testing.T) {
 		account:    "user@example.com",
 		edgeID:     "edge-user",
 		edgeName:   "User Edge",
-		workDir:    allowed,
+		workDir:    denied,
 		allowPaths: []string{allowed, denied},
 		agents: []workbenchAgentInfo{
 			{ID: "codex", Label: "Codex", Command: "codex", Enabled: true},
@@ -294,10 +294,12 @@ func TestTunnelResolveStartUsesUserPolicy(t *testing.T) {
 	resolved, err := runtime.ResolveWorkbenchStart(workbenchStartOptions{
 		Account: "user@example.com",
 		Agent:   "codex",
-		WorkDir: allowed,
 	})
 	if err != nil {
 		t.Fatalf("ResolveWorkbenchStart codex: %v", err)
+	}
+	if resolved.WorkDir != allowed {
+		t.Fatalf("resolved work dir = %q, want %q", resolved.WorkDir, allowed)
 	}
 	if resolved.Agent.Command != "codex" {
 		t.Fatalf("resolved command = %q, want agent id", resolved.Agent.Command)

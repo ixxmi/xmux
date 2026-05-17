@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"testing/fstest"
 	"time"
@@ -15,6 +16,8 @@ import (
 	"cloud-terminal/internal/config"
 	"cloud-terminal/internal/edge"
 	"cloud-terminal/internal/policy"
+
+	"github.com/gorilla/websocket"
 )
 
 func TestRoutesUseCloudTerminalPrefixes(t *testing.T) {
@@ -552,6 +555,62 @@ func TestUserSettingsPersistAndConstrainPolicy(t *testing.T) {
 	}
 	if len(state.AllowPaths) != 1 || state.AllowPaths[0] != allowedChild {
 		t.Fatalf("state allow_paths = %v, want %s", state.AllowPaths, allowedChild)
+	}
+	if state.WorkDir != allowedChild {
+		t.Fatalf("state work_dir = %q, want %q", state.WorkDir, allowedChild)
+	}
+}
+
+func TestTerminalWSDefaultsToAccountAllowPath(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	globalWorkDir := filepath.Join(root, "global")
+	accountWorkDir := filepath.Join(root, "account")
+	if err := os.MkdirAll(globalWorkDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(accountWorkDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	server := testServer(t, config.Config{
+		Server: config.ServerConfig{AccountRegistrationEnabled: testBoolPtr(true)},
+		Edge:   config.EdgeConfig{WorkDir: globalWorkDir},
+		Policy: policy.Config{
+			AllowPaths: []string{globalWorkDir},
+			Commands:   map[string]policy.CommandPolicy{"pwd": {Enabled: true}},
+		},
+	})
+	cookies := registerTestAccount(t, server, "user@example.com", "secret123")
+	if _, err := server.accountStore().SaveUserSettings("user@example.com", userSettingsUpdatePayload{
+		AllowPaths: []string{accountWorkDir},
+		Commands:   map[string]adminCommandPayload{"pwd": {Enabled: true}},
+	}, server.config.Snapshot().Policy); err != nil {
+		t.Fatalf("save user settings: %v", err)
+	}
+
+	httpServer := httptest.NewServer(server.Routes())
+	defer httpServer.Close()
+	wsURL := "ws" + strings.TrimPrefix(httpServer.URL, "http") + "/cloud-terminal-api/ws/terminal"
+	header := http.Header{}
+	for _, cookie := range cookies {
+		header.Add("Cookie", cookie.String())
+	}
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, header)
+	if err != nil {
+		t.Fatalf("dial terminal websocket: %v", err)
+	}
+	defer conn.Close()
+
+	var ready serverMessage
+	if err := conn.ReadJSON(&ready); err != nil {
+		t.Fatalf("read ready: %v", err)
+	}
+	if ready.Type != "ready" {
+		t.Fatalf("ready type = %q, want ready", ready.Type)
+	}
+	if ready.WorkDir != accountWorkDir {
+		t.Fatalf("ready work_dir = %q, want %q", ready.WorkDir, accountWorkDir)
 	}
 }
 

@@ -325,7 +325,7 @@ func (s *Server) pathCompletionsForAccount(account string, prefix string, workDi
 		}
 	}
 	if workDir == "" {
-		workDir = config.NormalizePath(cfg.Edge.WorkDir)
+		workDir = defaultWorkbenchPath(cfg.Edge.WorkDir, policyCfg.AllowPaths, policyCfg.RequirePathMatch)
 	}
 	if workDir == "" {
 		workDir = config.NormalizePath(".")
@@ -393,10 +393,7 @@ func (s *Server) terminalWS(w http.ResponseWriter, r *http.Request) {
 	user := normalizeTunnelAccount(account)
 	cfg := s.config.Snapshot()
 	policyCfg := s.policyForAccount(user, cfg.Policy)
-	workDir := config.NormalizePath(cfg.Edge.WorkDir)
-	if !pathWithinAllowed(workDir, policyCfg.AllowPaths) && len(policyCfg.AllowPaths) > 0 {
-		workDir = config.NormalizePath(policyCfg.AllowPaths[0])
-	}
+	workDir := defaultWorkbenchPath(cfg.Edge.WorkDir, policyCfg.AllowPaths, policyCfg.RequirePathMatch)
 
 	send(serverMessage{Type: "ready", SessionID: sessionID, EdgeID: s.edgeID, Data: welcome(s.edgeName), WorkDir: workDir})
 
