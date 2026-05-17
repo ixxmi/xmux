@@ -870,6 +870,62 @@ func TestAgentBindClearsAccountAllowPaths(t *testing.T) {
 	}
 }
 
+func TestAgentPolicyPersistsLocalConfigAndPublishesUpdate(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	allowed := filepath.Join(root, "workspace")
+	if err := os.MkdirAll(allowed, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(t.TempDir(), "agent.yaml")
+	cfg := config.Config{
+		Server: config.ServerConfig{Addr: "127.0.0.1:0"},
+		Policy: policy.Config{
+			Deny: []string{"old-deny"},
+			Commands: map[string]policy.CommandPolicy{
+				"pwd":   {Enabled: true},
+				"codex": {Enabled: true, Interactive: true},
+			},
+		},
+	}
+	published := 0
+	server := NewServer(Options{
+		Config:    config.NewStore(configPath, &cfg),
+		AgentMode: true,
+		AgentPolicyUpdate: func() error {
+			published++
+			return nil
+		},
+	})
+	handler := server.AgentRoutes("")
+
+	body := bytes.NewBufferString(`{"deny":["sudo"],"allow_paths":["` + allowed + `"],"commands":{"pwd":{"enabled":false},"codex":{"enabled":true,"interactive":true}}}`)
+	req := httptest.NewRequest(http.MethodPut, "/cloud-terminal-api/agent/policy", body)
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+	handler.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("agent policy status = %d body = %s", resp.Code, resp.Body.String())
+	}
+	snapshot := server.config.Snapshot()
+	if len(snapshot.Policy.Deny) != 1 || snapshot.Policy.Deny[0] != "sudo" {
+		t.Fatalf("local deny = %v, want sudo", snapshot.Policy.Deny)
+	}
+	if len(snapshot.Policy.AllowPaths) != 1 || snapshot.Policy.AllowPaths[0] != allowed {
+		t.Fatalf("local allow paths = %v, want %s", snapshot.Policy.AllowPaths, allowed)
+	}
+	if snapshot.Policy.Commands["pwd"].Enabled {
+		t.Fatalf("pwd command should be disabled in local policy: %+v", snapshot.Policy.Commands["pwd"])
+	}
+	if !snapshot.Policy.Commands["codex"].Enabled || !snapshot.Policy.Commands["codex"].Interactive {
+		t.Fatalf("codex command = %+v, want enabled interactive", snapshot.Policy.Commands["codex"])
+	}
+	if published != 1 {
+		t.Fatalf("publish count = %d, want 1", published)
+	}
+}
+
 func TestLegacyAccountsMigrateToSQLiteOnce(t *testing.T) {
 	t.Parallel()
 

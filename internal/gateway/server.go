@@ -52,6 +52,7 @@ type Options struct {
 	EdgeName           string
 	WorkbenchStatePath string
 	Logger             *slog.Logger
+	AgentPolicyUpdate  func() error
 	// AgentMode signals that the server is running as an agent's local
 	// management UI. The local account store and most cloud-side handlers
 	// are skipped; the admin UI proxies auth to the upstream gateway.
@@ -59,17 +60,18 @@ type Options struct {
 }
 
 type Server struct {
-	runtime   Runtime
-	staticFS  fs.FS
-	config    *config.Store
-	accountMu sync.RWMutex
-	accounts  *accountStore
-	edgeID    string
-	edgeName  string
-	logger    *slog.Logger
-	workbench *workbenchManager
-	tunnel    *tunnelHub
-	counter   atomic.Uint64
+	runtime           Runtime
+	staticFS          fs.FS
+	config            *config.Store
+	accountMu         sync.RWMutex
+	accounts          *accountStore
+	edgeID            string
+	edgeName          string
+	logger            *slog.Logger
+	workbench         *workbenchManager
+	tunnel            *tunnelHub
+	counter           atomic.Uint64
+	agentPolicyUpdate func() error
 }
 
 func NewServer(opts Options) *Server {
@@ -115,14 +117,15 @@ func NewServer(opts Options) *Server {
 		}
 	}
 	server := &Server{
-		runtime:  runtime,
-		staticFS: opts.StaticFS,
-		config:   opts.Config,
-		accounts: accounts,
-		edgeID:   opts.EdgeID,
-		edgeName: opts.EdgeName,
-		logger:   opts.Logger,
-		tunnel:   tunnelHub,
+		runtime:           runtime,
+		staticFS:          opts.StaticFS,
+		config:            opts.Config,
+		accounts:          accounts,
+		edgeID:            opts.EdgeID,
+		edgeName:          opts.EdgeName,
+		logger:            opts.Logger,
+		tunnel:            tunnelHub,
+		agentPolicyUpdate: opts.AgentPolicyUpdate,
 	}
 	server.workbench = newWorkbenchManager(runtime, opts.Config, opts.EdgeID, opts.EdgeName, opts.WorkbenchStatePath, opts.Logger)
 	server.workbench.policyResolver = accounts

@@ -53,6 +53,7 @@ type Agent struct {
 	sessions map[string]*edge.InteractiveSession
 	decoders map[string]*gateway.UTF8StreamDecoder
 	outputs  map[string]func(gateway.TunnelEnvelope) error
+	control  *clientConn
 	meta     map[string]agentSessionMeta
 }
 
@@ -147,6 +148,16 @@ func (a *Agent) runOnce(ctx context.Context) error {
 	defer conn.Close()
 
 	client := &clientConn{conn: conn}
+	a.mu.Lock()
+	a.control = client
+	a.mu.Unlock()
+	defer func() {
+		a.mu.Lock()
+		if a.control == client {
+			a.control = nil
+		}
+		a.mu.Unlock()
+	}()
 	if err := client.write(gateway.TunnelEnvelope{Type: "hello", Payload: mustRaw(a.hello())}); err != nil {
 		return err
 	}
@@ -277,6 +288,25 @@ func (a *Agent) hello() gateway.TunnelHello {
 		Agents:       gateway.ListWorkbenchAgents(cfg),
 		Sessions:     a.sessionInfos(),
 	}
+}
+
+func (a *Agent) PublishPolicyUpdate() error {
+	if a == nil {
+		return errors.New("agent is not configured")
+	}
+	cfg := a.config.Snapshot()
+	update := gateway.TunnelPolicyUpdate{
+		WorkDir:    config.NormalizePath(cfg.Edge.WorkDir),
+		AllowPaths: slices.Clone(cfg.Policy.AllowPaths),
+		Agents:     gateway.ListWorkbenchAgents(cfg),
+	}
+	a.mu.Lock()
+	client := a.control
+	a.mu.Unlock()
+	if client == nil {
+		return nil
+	}
+	return client.write(gateway.TunnelEnvelope{Type: "policy_update", Payload: mustRaw(update)})
 }
 
 func (a *Agent) handle(ctx context.Context, client *clientConn, env gateway.TunnelEnvelope) {

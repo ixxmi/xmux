@@ -8,7 +8,10 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"slices"
 	"strings"
+
+	"cloud-terminal/internal/policy"
 )
 
 // AgentRoutes returns an HTTP handler for the agent-mode local admin server.
@@ -29,6 +32,7 @@ func (s *Server) AgentRoutes(initialCloudBaseURL string) http.Handler {
 
 	// Local-only endpoints
 	mux.HandleFunc("/cloud-terminal-api/agent/config", s.agentConfig)
+	mux.HandleFunc("/cloud-terminal-api/agent/policy", s.agentPolicy)
 	mux.HandleFunc("/cloud-terminal-api/agent/bind", s.agentBind)
 	mux.HandleFunc("/cloud-terminal-api/admin/fs", s.agentLocalFS)
 
@@ -187,6 +191,71 @@ type agentBindPayload struct {
 	Account   string `json:"account"`
 	SessionID string `json:"session_id"`
 	Clear     bool   `json:"clear,omitempty"`
+}
+
+type agentPolicyPayload struct {
+	Deny       []string                       `json:"deny"`
+	AllowPaths []string                       `json:"allow_paths"`
+	Commands   map[string]adminCommandPayload `json:"commands"`
+}
+
+func (s *Server) agentPolicy(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, http.StatusOK, agentPolicyFromConfig(s.config.Snapshot().Policy))
+	case http.MethodPut:
+		var payload agentPolicyPayload
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		next := s.config.Snapshot().Policy
+		if payload.Deny != nil {
+			next.Deny = cleanList(payload.Deny)
+		}
+		next.AllowPaths = cleanPaths(payload.AllowPaths)
+		next.Commands = policyCommandsFromAdminPayload(payload.Commands)
+		if err := s.config.UpdatePolicy(next); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if s.agentPolicyUpdate != nil {
+			if err := s.agentPolicyUpdate(); err != nil {
+				s.logger.Warn("publish agent policy update", "error", err)
+			}
+		}
+		writeJSON(w, http.StatusOK, agentPolicyFromConfig(s.config.Snapshot().Policy))
+	default:
+		w.Header().Set("Allow", "GET, PUT")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func agentPolicyFromConfig(cfg policy.Config) agentPolicyPayload {
+	return agentPolicyPayload{
+		Deny:       slices.Clone(cfg.Deny),
+		AllowPaths: slices.Clone(cfg.AllowPaths),
+		Commands:   adminPayloadCommands(cfg.Commands),
+	}
+}
+
+func policyCommandsFromAdminPayload(commands map[string]adminCommandPayload) map[string]policy.CommandPolicy {
+	out := make(map[string]policy.CommandPolicy, len(commands))
+	for rawName, payload := range commands {
+		name := strings.TrimSpace(rawName)
+		if name == "" {
+			continue
+		}
+		out[name] = policy.CommandPolicy{
+			Enabled:     payload.Enabled,
+			Bin:         strings.TrimSpace(payload.Bin),
+			Interactive: payload.Interactive,
+			Subcommands: cleanList(payload.Subcommands),
+			AllowPaths:  cleanPaths(payload.AllowPaths),
+			MaxArgs:     payload.MaxArgs,
+		}
+	}
+	return out
 }
 
 // agentBind persists the cloud tunnel credentials to the local agent.yaml.

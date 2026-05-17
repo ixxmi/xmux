@@ -73,6 +73,26 @@ func main() {
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
 
+		// Resolve the cloud base URL used for proxying auth and user APIs.
+		// gateway_url is the actual cloud API server; discovery_url is used
+		// only when gateway_url is not configured (and typically points to
+		// the same host anyway).
+		cloudBase := strings.TrimSpace(cloudTunnel.GatewayURL)
+		if cloudBase == "" {
+			cloudBase = strings.TrimSpace(cloudTunnel.DiscoveryURL)
+		}
+
+		localAgent := agent.New(agent.Options{
+			DiscoveryURL: cloudTunnel.DiscoveryURL,
+			GatewayURL:   cloudTunnel.GatewayURL,
+			Username:     cloudTunnel.Account,
+			SessionID:    cloudTunnel.SessionID,
+			Runtime:      runtime,
+			Config:       store,
+			EdgeID:       cfg.Edge.ID,
+			EdgeName:     cfg.Edge.Name,
+			Logger:       logger,
+		})
 		srv := gateway.NewServer(gateway.Options{
 			Runtime:            nil,
 			StaticFS:           cloudterminal.WebFS(),
@@ -82,16 +102,8 @@ func main() {
 			WorkbenchStatePath: cfg.Server.WorkbenchStatePath,
 			Logger:             logger,
 			AgentMode:          true,
+			AgentPolicyUpdate:  localAgent.PublishPolicyUpdate,
 		})
-
-		// Resolve the cloud base URL used for proxying auth and user APIs.
-		// gateway_url is the actual cloud API server; discovery_url is used
-		// only when gateway_url is not configured (and typically points to
-		// the same host anyway).
-		cloudBase := strings.TrimSpace(cloudTunnel.GatewayURL)
-		if cloudBase == "" {
-			cloudBase = strings.TrimSpace(cloudTunnel.DiscoveryURL)
-		}
 
 		httpServer := &http.Server{
 			Addr:              cfg.Server.Addr,
@@ -106,20 +118,9 @@ func main() {
 			}
 		}()
 
-		agent := agent.New(agent.Options{
-			DiscoveryURL: cloudTunnel.DiscoveryURL,
-			GatewayURL:   cloudTunnel.GatewayURL,
-			Username:     cloudTunnel.Account,
-			SessionID:    cloudTunnel.SessionID,
-			Runtime:      runtime,
-			Config:       store,
-			EdgeID:       cfg.Edge.ID,
-			EdgeName:     cfg.Edge.Name,
-			Logger:       logger,
-		})
 		agentErr := make(chan error, 1)
 		go func() {
-			agentErr <- agent.Run(ctx)
+			agentErr <- localAgent.Run(ctx)
 		}()
 
 		select {

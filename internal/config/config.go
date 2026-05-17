@@ -306,6 +306,20 @@ func (s *Store) BindTunnelAccount(account, sessionID string) error {
 	return s.writeConfig(next)
 }
 
+func (s *Store) UpdatePolicy(nextPolicy policy.Config) error {
+	s.mu.Lock()
+	next := cloneConfig(s.cfg)
+	s.mu.Unlock()
+	next.Policy = clonePolicy(nextPolicy)
+	if len(next.Policy.Commands) == 0 {
+		return errors.New("policy.commands must not be empty")
+	}
+	if _, err := policy.NewEngine(next.Policy); err != nil {
+		return err
+	}
+	return s.writeConfig(next)
+}
+
 func (s *Store) writeConfig(next Config) error {
 	content, err := yaml.Marshal(next)
 	if err != nil {
@@ -385,6 +399,15 @@ func cloneConfig(cfg Config) Config {
 	cfg.Policy.AllowPaths = slices.Clone(cfg.Policy.AllowPaths)
 	cfg.Policy.Commands = cloneCommands(cfg.Policy.Commands)
 	return cfg
+}
+
+func clonePolicy(cfg policy.Config) policy.Config {
+	return policy.Config{
+		Deny:             slices.Clone(cfg.Deny),
+		AllowPaths:       slices.Clone(cfg.AllowPaths),
+		Commands:         cloneCommands(cfg.Commands),
+		RequirePathMatch: cfg.RequirePathMatch,
+	}
 }
 
 func (c ServerConfig) RegistrationEnabled() bool {

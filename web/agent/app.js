@@ -236,6 +236,29 @@ function renderCloudSettings() {
   els.saveState.textContent = "Loaded";
 }
 
+async function saveLocalPolicy(payload) {
+  const res = await api("/cloud-terminal-api/agent/policy", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      deny: payload.deny,
+      allow_paths: payload.allow_paths,
+      commands: payload.commands
+    })
+  });
+  return res.json();
+}
+
+async function syncCloudSettings(payload) {
+  const res = await api("/cloud-terminal-api/user/settings", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+  state.cloudSettings = await res.json();
+  return state.cloudSettings;
+}
+
 function renderPolicySummary() {
   const limits = state.cloudSettings?.policy_limits || {};
   const commands = limits.commands || {};
@@ -277,6 +300,7 @@ function renderCommands() {
 
 function collectCommandsPayload() {
   const limits = state.cloudSettings?.policy_limits?.commands || {};
+  const deniedCommands = state.cloudSettings?.policy_limits?.deny || [];
   const current = state.cloudSettings?.commands || {};
   const commands = {};
   for (const name of Object.keys(limits)) {
@@ -291,6 +315,7 @@ function collectCommandsPayload() {
   }
   return {
     cloud_tunnel_enabled: Boolean(state.cloudSettings?.cloud_tunnel_enabled),
+    deny: deniedCommands,
     allow_paths: Array.isArray(state.cloudSettings?.allow_paths) ? state.cloudSettings.allow_paths : [],
     commands
   };
@@ -299,23 +324,30 @@ function collectCommandsPayload() {
 function collectPathsPayload() {
   return {
     cloud_tunnel_enabled: Boolean(state.cloudSettings?.cloud_tunnel_enabled),
+    deny: state.cloudSettings?.policy_limits?.deny || [],
     allow_paths: splitLines(els.globalAllowPaths.value),
     commands: state.cloudSettings?.commands || {}
   };
 }
 
+function localPolicyPayload(settings) {
+  return {
+    deny: settings?.policy_limits?.deny || [],
+    allow_paths: Array.isArray(settings?.allow_paths) ? settings.allow_paths : [],
+    commands: settings?.commands || {}
+  };
+}
+
 async function saveCommands() {
   els.saveCommandsButton.disabled = true;
-  setCommandsMessage("保存中...", "");
+  setCommandsMessage("同步云端账号...", "");
   try {
-    const res = await api("/cloud-terminal-api/user/settings", {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(collectCommandsPayload())
-    });
-    state.cloudSettings = await res.json();
+    const payload = collectCommandsPayload();
+    const cloudSettings = await syncCloudSettings(payload);
+    setCommandsMessage("保存本地配置...", "");
+    await saveLocalPolicy(localPolicyPayload(cloudSettings));
     renderCloudSettings();
-    setCommandsMessage("已保存", "ok");
+    setCommandsMessage("已同步到本地和云端", "ok");
     setTimeout(() => setCommandsMessage("", ""), 1500);
   } catch (error) {
     setCommandsMessage(error.message || "保存失败", "error");
@@ -326,16 +358,14 @@ async function saveCommands() {
 
 async function savePaths() {
   els.savePathsButton.disabled = true;
-  setPathsMessage("保存中...", "");
+  setPathsMessage("同步云端账号...", "");
   try {
-    const res = await api("/cloud-terminal-api/user/settings", {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(collectPathsPayload())
-    });
-    state.cloudSettings = await res.json();
+    const payload = collectPathsPayload();
+    const cloudSettings = await syncCloudSettings(payload);
+    setPathsMessage("保存本地配置...", "");
+    await saveLocalPolicy(localPolicyPayload(cloudSettings));
     renderCloudSettings();
-    setPathsMessage("已保存", "ok");
+    setPathsMessage("已同步到本地和云端", "ok");
     setTimeout(() => setPathsMessage("", ""), 1500);
   } catch (error) {
     setPathsMessage(error.message || "保存失败", "error");

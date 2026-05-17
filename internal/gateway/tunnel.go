@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -60,6 +61,14 @@ type tunnelHello struct {
 }
 
 type TunnelHello = tunnelHello
+
+type tunnelPolicyUpdate struct {
+	WorkDir    string               `json:"work_dir"`
+	AllowPaths []string             `json:"allow_paths"`
+	Agents     []workbenchAgentInfo `json:"agents"`
+}
+
+type TunnelPolicyUpdate = tunnelPolicyUpdate
 
 type tunnelStartSessionRequest struct {
 	SessionID        string   `json:"session_id"`
@@ -379,7 +388,23 @@ func (c *tunnelClient) handle(env tunnelEnvelope) {
 		}
 		c.emit(msg)
 		c.notifyExit(msg)
+	case "policy_update":
+		var payload tunnelPolicyUpdate
+		if decodeTunnelPayload(env.Payload, &payload) != nil {
+			return
+		}
+		c.updatePolicy(payload)
 	}
+}
+
+func (c *tunnelClient) updatePolicy(next tunnelPolicyUpdate) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if strings.TrimSpace(next.WorkDir) != "" {
+		c.workDir = next.WorkDir
+	}
+	c.allowPaths = slices.Clone(next.AllowPaths)
+	c.agents = slices.Clone(next.Agents)
 }
 
 func (c *tunnelClient) emit(msg workbenchServerMessage) {
