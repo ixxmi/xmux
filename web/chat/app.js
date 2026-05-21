@@ -2,6 +2,11 @@
   const SESSION_KEY = "cloud-terminal-chat-session";
   const ACTIVE_AGENT_KEY = "cloud-terminal-chat-agent";
   const messageKey = (id) => `cloud-terminal-chat-messages:${id}`;
+  const appPath = window.XMuxPath?.path || ((path) => path);
+  const websocketURL = window.XMuxPath?.websocketURL || ((path) => {
+    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    return `${protocol}//${window.location.host}${path}`;
+  });
 
   const authView = document.getElementById("authView");
   const chatView = document.getElementById("chatView");
@@ -144,13 +149,13 @@
   });
 
   async function bootstrap() {
-    usernameInput.focus();
     try {
       state = await fetchJSON("/cloud-terminal-api/workbench/state", null, 5000);
       openChat();
     } catch {
       authView.hidden = false;
       chatView.hidden = true;
+      usernameInput.focus();
     }
   }
 
@@ -215,8 +220,7 @@
     } else {
       params.set("agent", selectedAgent);
     }
-    const protocol = window.location.protocol === "https:" ? "wss" : "ws";
-    socket = new WebSocket(`${protocol}://${window.location.host}/cloud-terminal-api/ws/workbench?${params.toString()}`);
+    socket = new WebSocket(websocketURL(`/cloud-terminal-api/ws/workbench?${params.toString()}`));
     manualClose = false;
 
     socket.addEventListener("open", () => {
@@ -470,7 +474,7 @@
     const timer = window.setTimeout(() => controller.abort(), timeout);
     let response;
     try {
-      response = await fetch(url, Object.assign({ credentials: "same-origin", signal: controller.signal }, options || {}));
+      response = await fetch(appPath(url), Object.assign({ credentials: "same-origin", signal: controller.signal }, options || {}));
     } catch (error) {
       if (error.name === "AbortError") {
         throw new Error("Request timeout.");

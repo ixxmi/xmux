@@ -4,6 +4,7 @@ const state = {
   currentPath: "",
   currentEntries: []
 };
+const appPath = window.XMuxPath?.path || ((path) => path);
 
 const els = {
   saveState: document.getElementById("saveState"),
@@ -90,7 +91,7 @@ async function init() {
     const data = await me.json();
     renderAccount(data);
   } catch {
-    window.location.href = "/agent/login.html";
+    window.location.href = appPath("/agent/login.html");
     return;
   }
   await Promise.all([loadAgentConfig(), loadCloudSettings(), loadFS("/")]);
@@ -154,7 +155,12 @@ async function bindLocalClient() {
 }
 
 async function unbindLocalClient() {
-  if (!confirm("解绑后客户端将断开反向穿透，并清空当前账号保存的允许路径，确认继续？")) {
+  const ok = await XDialog.confirm("解绑后客户端将断开反向穿透，并清空当前账号保存的允许路径，确认继续？", {
+    title: "解绑账号",
+    okText: "解绑",
+    danger: true,
+  });
+  if (!ok) {
     return;
   }
   els.bindButton.disabled = true;
@@ -488,8 +494,8 @@ async function saveProfile() {
 
 async function logout() {
   closeDropdown();
-  try { await fetch("/cloud-terminal-api/accounts/logout", { method: "POST", credentials: "include" }); } catch {}
-  window.location.href = "/agent/login.html";
+  try { await fetch(appPath("/cloud-terminal-api/accounts/logout"), { method: "POST", credentials: "include" }); } catch {}
+  window.location.href = appPath("/agent/login.html");
 }
 
 function renderAccount(data) {
@@ -548,9 +554,9 @@ function setProfileMessage(text, tone) {
 
 async function api(path, options = {}) {
   const headers = new Headers(options.headers || {});
-  const res = await fetch(path, { ...options, headers, credentials: "include" });
+  const res = await fetch(appPath(path), { ...options, headers, credentials: "include" });
   if (res.status === 401 || res.status === 403) {
-    window.location.href = "/agent/login.html";
+    window.location.href = appPath("/agent/login.html");
     throw new Error("Unauthorized");
   }
   if (!res.ok) throw new Error(await res.text());

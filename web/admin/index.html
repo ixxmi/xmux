@@ -4,7 +4,8 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>xmux Admin</title>
-    <link rel="stylesheet" href="/admin/styles.css" />
+    <link rel="stylesheet" href="styles.css" />
+    <link rel="stylesheet" href="../shared/dialog.css" />
   </head>
   <body>
     <main class="admin-layout">
@@ -19,6 +20,7 @@
         <nav class="nav">
           <button class="nav-item active" type="button" data-section="access">访问控制</button>
           <button class="nav-item" type="button" data-section="accounts">云账号</button>
+          <button class="nav-item" type="button" data-section="auth">登录与邮件</button>
           <button class="nav-item" type="button" data-section="commands">命令策略</button>
           <button class="nav-item" type="button" data-section="paths">文件路径</button>
         </nav>
@@ -115,6 +117,84 @@
           </div>
         </section>
 
+        <section class="section" id="section-auth">
+          <div class="section-grid two">
+            <article class="panel">
+              <h2>密码策略与注册</h2>
+              <label>最小密码长度<input id="pwdMinLength" type="number" min="6" max="64" /></label>
+              <div class="switch-row">
+                <label class="check"><input id="pwdRequireUpper" type="checkbox" /> 必须含大写字母</label>
+                <label class="check"><input id="pwdRequireLower" type="checkbox" /> 必须含小写字母</label>
+              </div>
+              <div class="switch-row">
+                <label class="check"><input id="pwdRequireDigit" type="checkbox" /> 必须含数字</label>
+                <label class="check"><input id="pwdRequireSymbol" type="checkbox" /> 必须含特殊符号</label>
+              </div>
+              <label class="check standalone"><input id="pwdDenyCommon" type="checkbox" /> 拒绝常见弱密码</label>
+              <hr />
+              <label class="check standalone"><input id="authRequireEmailOnRegister" type="checkbox" /> 注册必须填邮箱</label>
+              <label class="check standalone"><input id="authRequireEmailVerifiedToLogin" type="checkbox" /> 未验证邮箱禁止登录</label>
+              <label class="check standalone"><input id="authOAuthGoogleEnabled" type="checkbox" /> 启用 Google 登录</label>
+              <label class="check standalone"><input id="authOAuthGoogleAutoRegister" type="checkbox" /> Google 新邮箱自动注册</label>
+              <label>邮件链接 Base URL<input id="authAppBaseURL" placeholder="https://xmux.example.com" /></label>
+              <div class="account-list-head">
+                <span id="authSaveState">未修改</span>
+                <button id="saveAuthSettings" type="button">保存</button>
+              </div>
+            </article>
+            <article class="panel">
+              <h2>SMTP 发件配置</h2>
+              <label class="check standalone"><input id="smtpEnabled" type="checkbox" /> 启用 SMTP（关闭则只把邮件写入日志）</label>
+              <div class="form-grid">
+                <label>SMTP Host<input id="smtpHost" placeholder="smtp.example.com" /></label>
+                <label>Port<input id="smtpPort" type="number" placeholder="587" /></label>
+              </div>
+              <div class="form-grid">
+                <label>Username<input id="smtpUsername" autocomplete="off" /></label>
+                <label>Password<input id="smtpPassword" type="password" autocomplete="new-password" placeholder="留空则保留原密码" /></label>
+              </div>
+              <div class="form-grid">
+                <label>From Address<input id="smtpFromAddress" placeholder="no-reply@example.com" /></label>
+                <label>From Name<input id="smtpFromName" placeholder="xmux" /></label>
+              </div>
+              <div class="switch-row">
+                <label class="check"><input id="smtpStartTLS" type="checkbox" /> STARTTLS</label>
+                <label class="check"><input id="smtpSMTPS" type="checkbox" /> SMTPS（隐式 TLS）</label>
+                <label class="check"><input id="smtpSkipVerify" type="checkbox" /> 跳过证书校验</label>
+              </div>
+              <div class="account-list-head">
+                <span id="smtpStatus">未配置</span>
+                <button id="saveSMTPSettings" type="button">保存 SMTP</button>
+              </div>
+              <hr />
+              <div class="form-grid">
+                <label>测试发件人地址<input id="smtpTestTo" placeholder="me@example.com" /></label>
+                <button id="testSMTP" class="secondary" type="button">发测试邮件</button>
+              </div>
+              <p id="smtpTestResult" class="login-message"></p>
+            </article>
+            <article class="panel">
+              <h2>Google OAuth</h2>
+              <label class="check standalone"><input id="oauthGoogleEnabled" type="checkbox" /> 启用</label>
+              <label>Client ID<input id="oauthGoogleClientID" autocomplete="off" /></label>
+              <label>Client Secret<input id="oauthGoogleClientSecret" type="password" autocomplete="new-password" placeholder="留空则保留原 secret" /></label>
+              <label>Redirect URL<input id="oauthGoogleRedirectURL" placeholder="https://xmux.example.com/cloud-terminal-api/accounts/oauth/google/callback" /></label>
+              <label>Hosted Domain（可选）<input id="oauthGoogleHostedDomain" placeholder="example.com（限制仅此域名员工可登录）" /></label>
+              <label>邮箱撞库策略
+                <select id="oauthGoogleLinkExistingMode">
+                  <option value="require_password">需要输本地密码再绑定（推荐）</option>
+                  <option value="auto">自动绑定</option>
+                  <option value="deny">拒绝并提示用密码登录</option>
+                </select>
+              </label>
+              <div class="account-list-head">
+                <span id="oauthGoogleStatus">未配置</span>
+                <button id="saveOAuthGoogleSettings" type="button">保存 OAuth</button>
+              </div>
+            </article>
+          </div>
+        </section>
+
         <section class="section" id="section-commands">
           <div class="tabs">
             <button class="tab active" type="button" data-command-tab="allow">白名单</button>
@@ -181,6 +261,8 @@
         </section>
       </section>
     </main>
-    <script src="/admin/app.js"></script>
+    <script src="../shared/path.js"></script>
+    <script src="../shared/dialog.js"></script>
+    <script src="app.js"></script>
   </body>
 </html>

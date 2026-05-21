@@ -1,17 +1,21 @@
 package gateway
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"cloud-terminal/internal/config"
+	"cloud-terminal/internal/edge"
 	"cloud-terminal/internal/policy"
 )
 
@@ -42,6 +46,10 @@ func (c *tunnelRoundTripConn) Close() error {
 	return nil
 }
 
+func (c *tunnelRoundTripConn) SetWriteDeadline(time.Time) error {
+	return nil
+}
+
 func (c *tunnelRoundTripConn) ReadJSON(any) error {
 	<-make(chan struct{})
 	return nil
@@ -53,7 +61,7 @@ func TestWorkbenchAuthorizedUsesCookie(t *testing.T) {
 	server := testServer(t, config.Config{
 		Policy: minimalPolicy(),
 	})
-	cookies := registerTestAccount(t, server, "mobile@example.com", "secret123")
+	cookies := registerTestAccount(t, server, "mobile@example.com", "TestPassword1")
 	request := &http.Request{Header: http.Header{}, URL: &url.URL{}}
 	for _, cookie := range cookies {
 		request.AddCookie(cookie)
@@ -102,6 +110,26 @@ func TestWorkbenchSessionReplayIsBounded(t *testing.T) {
 	}
 }
 
+func TestWorkbenchHistoricalReplayForAttachIsTailBounded(t *testing.T) {
+	t.Parallel()
+
+	replay := strings.Repeat("a", workbenchHistoricalReplayMax+128)
+	got := replayForAttach(workbenchSnapshot{
+		Running: false,
+		Replay:  replay,
+	})
+
+	if !strings.Contains(got, "showing last 128 KiB") {
+		t.Fatalf("historical replay marker missing: %q", got[:64])
+	}
+	if !strings.HasSuffix(got, strings.Repeat("a", workbenchHistoricalReplayMax)) {
+		t.Fatal("historical replay should include the tail of saved output")
+	}
+	if len(got) >= len(replay) {
+		t.Fatalf("historical replay length = %d, want less than original %d", len(got), len(replay))
+	}
+}
+
 func TestWorkbenchSessionsPersistToDisk(t *testing.T) {
 	t.Parallel()
 
@@ -124,6 +152,8 @@ func TestWorkbenchSessionsPersistToDisk(t *testing.T) {
 				workDir:     "/tmp/project",
 				startedAt:   startedAt,
 				lastActive:  lastActive,
+				submitted:   true,
+				title:       "fix bug",
 				running:     false,
 				exitCode:    0,
 				duration:    "1s",
@@ -152,11 +182,255 @@ func TestWorkbenchSessionsPersistToDisk(t *testing.T) {
 		t.Fatal("expected session to be loaded")
 	}
 	snapshot := session.snapshot()
-	if snapshot.Agent != "codex" || snapshot.WorkDir != "/tmp/project" || snapshot.Replay != "──ok\n" {
+	if snapshot.Agent != "codex" || snapshot.WorkDir != "/tmp/project" || snapshot.Replay != "──ok\n" || snapshot.Title != "fix bug" {
 		t.Fatalf("snapshot = %+v", snapshot)
 	}
 	if snapshot.Running {
 		t.Fatal("persisted sessions should load as non-running")
+	}
+}
+
+func TestWorkbenchLoadStateClearsRestartUnavailableError(t *testing.T) {
+	t.Parallel()
+
+	statePath := filepath.Join(t.TempDir(), "workbench_sessions.json")
+	startedAt := time.Now().Add(-time.Minute).Truncate(time.Second)
+	state := workbenchPersistedState{
+		Version: 1,
+		Sessions: []workbenchPersistedSession{
+			{
+				ID:         "session-1",
+				Agent:      "codex",
+				WorkDir:    "/tmp/project",
+				StartedAt:  startedAt,
+				LastActive: startedAt,
+				Submitted:  true,
+				Running:    true,
+				Error:      workbenchRestartUnavailableError,
+				Replay:     "previous output\n",
+			},
+		},
+	}
+	raw, err := json.Marshal(state)
+	if err != nil {
+		t.Fatalf("marshal state: %v", err)
+	}
+	if err := os.WriteFile(statePath, raw, 0o600); err != nil {
+		t.Fatalf("write state: %v", err)
+	}
+
+	manager := &workbenchManager{
+		edgeID:    "edge",
+		edgeName:  "Edge",
+		statePath: statePath,
+		logger:    slog.Default(),
+		sessions:  map[string]*workbenchSession{},
+	}
+	if err := manager.loadState(); err != nil {
+		t.Fatalf("loadState: %v", err)
+	}
+
+	snapshot := manager.sessions["session-1"].snapshot()
+	if snapshot.Running {
+		t.Fatal("restarted persisted session should load as historical")
+	}
+	if snapshot.Error != "" {
+		t.Fatalf("snapshot error = %q, want cleared restart placeholder", snapshot.Error)
+	}
+}
+
+func TestWorkbenchSessionsIgnoreUnsubmittedSessions(t *testing.T) {
+	t.Parallel()
+
+	statePath := filepath.Join(t.TempDir(), "workbench_sessions.json")
+	submittedAt := time.Now().Truncate(time.Second)
+	manager := &workbenchManager{
+		edgeID:    "edge",
+		edgeName:  "Edge",
+		statePath: statePath,
+		logger:    slog.Default(),
+		sessions: map[string]*workbenchSession{
+			"submitted": {
+				id:          "submitted",
+				edgeID:      "edge",
+				edgeName:    "Edge",
+				agent:       "codex",
+				workDir:     "/tmp/project",
+				startedAt:   submittedAt,
+				lastActive:  submittedAt,
+				submitted:   true,
+				title:       "implement task",
+				running:     true,
+				attachments: map[uint64]func(workbenchServerMessage){},
+			},
+			"empty": {
+				id:          "empty",
+				edgeID:      "edge",
+				edgeName:    "Edge",
+				agent:       "codex",
+				workDir:     "/tmp/project",
+				startedAt:   submittedAt,
+				lastActive:  submittedAt,
+				running:     true,
+				attachments: map[uint64]func(workbenchServerMessage){},
+			},
+		},
+	}
+
+	listed := manager.list("", []string{"/tmp"}, true)
+	if len(listed) != 1 || listed[0].ID != "submitted" || listed[0].Title != "implement task" {
+		t.Fatalf("listed sessions = %+v, want only submitted session", listed)
+	}
+	if err := manager.saveState(); err != nil {
+		t.Fatalf("saveState: %v", err)
+	}
+	var persisted workbenchPersistedState
+	raw, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatalf("read persisted state: %v", err)
+	}
+	if err := json.Unmarshal(raw, &persisted); err != nil {
+		t.Fatalf("decode persisted state: %v", err)
+	}
+	if len(persisted.Sessions) != 1 || persisted.Sessions[0].ID != "submitted" {
+		t.Fatalf("persisted sessions = %+v, want only submitted session", persisted.Sessions)
+	}
+}
+
+func TestWorkbenchGetOrCreateReturnsHistoricalSessionReadOnly(t *testing.T) {
+	t.Parallel()
+
+	session := &workbenchSession{
+		id:          "history",
+		account:     "user@example.com",
+		edgeID:      "edge",
+		edgeName:    "Edge",
+		agent:       "codex",
+		workDir:     "/tmp/project",
+		startedAt:   time.Now().Add(-time.Minute),
+		lastActive:  time.Now(),
+		submitted:   true,
+		title:       "old task",
+		running:     false,
+		replay:      []byte("previous output\n"),
+		attachments: map[uint64]func(workbenchServerMessage){},
+	}
+	manager := &workbenchManager{
+		runtime:  historicalRuntime{},
+		logger:   slog.Default(),
+		sessions: map[string]*workbenchSession{"history": session},
+	}
+
+	got, created, err := manager.getOrCreate(workbenchStartOptions{
+		SessionID: "history",
+		Account:   "user@example.com",
+		Rows:      24,
+		Cols:      80,
+	})
+	if err != nil {
+		t.Fatalf("getOrCreate: %v", err)
+	}
+	if created {
+		t.Fatal("historical session should not create a new process")
+	}
+	if got != session {
+		t.Fatal("expected existing historical session")
+	}
+	snap := got.snapshot()
+	if snap.Running {
+		t.Fatalf("snapshot running = true, want false")
+	}
+	if err := got.Write([]byte("input")); !errors.Is(err, errWorkbenchSessionNotRunning) {
+		t.Fatalf("historical Write error = %v, want %v", err, errWorkbenchSessionNotRunning)
+	}
+	if err := got.Resize(24, 80); !errors.Is(err, errWorkbenchSessionNotRunning) {
+		t.Fatalf("historical Resize error = %v, want %v", err, errWorkbenchSessionNotRunning)
+	}
+}
+
+func TestWorkbenchGetOrCreateResumesExistingTunnelSession(t *testing.T) {
+	t.Parallel()
+
+	done := make(chan edge.ExecResult, 1)
+	runtime := &resumeRuntime{session: &stubInteractiveSession{done: done}}
+	session := &workbenchSession{
+		id:          "session-1",
+		requestID:   "request-1",
+		account:     "user@example.com",
+		edgeID:      "edge",
+		edgeName:    "Edge",
+		agent:       "codex",
+		workDir:     "/tmp/project",
+		startedAt:   time.Now().Add(-time.Minute),
+		lastActive:  time.Now(),
+		submitted:   true,
+		title:       "resume task",
+		running:     false,
+		errText:     "session unavailable after service restart",
+		attachments: map[uint64]func(workbenchServerMessage){},
+	}
+	manager := &workbenchManager{
+		runtime:  runtime,
+		logger:   slog.Default(),
+		sessions: map[string]*workbenchSession{"session-1": session},
+	}
+
+	got, created, err := manager.getOrCreate(workbenchStartOptions{
+		SessionID: "session-1",
+		Account:   "user@example.com",
+		Rows:      30,
+		Cols:      100,
+	})
+	if err != nil {
+		t.Fatalf("getOrCreate: %v", err)
+	}
+	if created {
+		t.Fatal("resume should reuse existing session record")
+	}
+	if got != session {
+		t.Fatal("expected resumed existing session")
+	}
+	if runtime.resumeCalls != 1 {
+		t.Fatalf("resume calls = %d, want 1", runtime.resumeCalls)
+	}
+	snap := got.snapshot()
+	if !snap.Running || snap.Error != "" {
+		t.Fatalf("snapshot = %+v, want running without restart error", snap)
+	}
+	if err := got.Write([]byte("hello")); err != nil {
+		t.Fatalf("write resumed session: %v", err)
+	}
+	if string(runtime.session.writes[0]) != "hello" {
+		t.Fatalf("writes = %q, want hello", string(runtime.session.writes[0]))
+	}
+
+	done <- edge.ExecResult{RequestID: "request-1", ExitCode: 0, Duration: "1ms"}
+}
+
+func TestWorkbenchSessionCapturesFirstSubmittedTitle(t *testing.T) {
+	t.Parallel()
+
+	session := &workbenchSession{
+		id:          "session",
+		agent:       "codex",
+		workDir:     "/tmp/project",
+		startedAt:   time.Now(),
+		lastActive:  time.Now(),
+		running:     true,
+		attachments: map[uint64]func(workbenchServerMessage){},
+	}
+	if _, ok := session.captureSubmitTitle("fix"); ok {
+		t.Fatal("partial input should not submit")
+	}
+	if title, ok := session.captureSubmitTitle(" tests\r"); !ok || title != "fix tests" {
+		t.Fatalf("submitted title = %q, %v; want fix tests, true", title, ok)
+	}
+	if title, ok := session.captureSubmitTitle("another\r"); ok || title != "" {
+		t.Fatalf("second submit = %q, %v; want ignored", title, ok)
+	}
+	snap := session.snapshot()
+	if !snap.Submitted || snap.Title != "fix tests" {
+		t.Fatalf("snapshot = %+v, want submitted title", snap)
 	}
 }
 
@@ -230,7 +504,7 @@ func TestTunnelWorkbenchStateIsFilteredByUserPolicy(t *testing.T) {
 			},
 		}),
 	})
-	registerTestAccount(t, server, "user@example.com", "secret123")
+	registerTestAccount(t, server, "user@example.com", "TestPassword1")
 	if _, err := server.accountStore().SaveUserSettings("user@example.com", userSettingsUpdatePayload{
 		CloudTunnelEnabled: true,
 		AllowPaths:         []string{allowed},
@@ -298,7 +572,7 @@ func TestTunnelWorkbenchStateShowsAccountPathsEvenBeforeAgentPolicySync(t *testi
 			},
 		}),
 	})
-	registerTestAccount(t, server, "user@example.com", "secret123")
+	registerTestAccount(t, server, "user@example.com", "TestPassword1")
 	if _, err := server.accountStore().SaveUserSettings("user@example.com", userSettingsUpdatePayload{
 		CloudTunnelEnabled: true,
 		AllowPaths:         []string{accountPath},
@@ -349,7 +623,7 @@ func TestTunnelWorkbenchStateShowsAccountPathsWhenAgentOffline(t *testing.T) {
 			},
 		}),
 	})
-	registerTestAccount(t, server, "user@example.com", "secret123")
+	registerTestAccount(t, server, "user@example.com", "TestPassword1")
 	if _, err := server.accountStore().SaveUserSettings("user@example.com", userSettingsUpdatePayload{
 		CloudTunnelEnabled: true,
 		AllowPaths:         []string{accountPath},
@@ -413,7 +687,7 @@ func TestTunnelWorkbenchFilesUsesAccountAllowPaths(t *testing.T) {
 			},
 		}),
 	})
-	cookies := registerTestAccount(t, server, "user@example.com", "secret123")
+	cookies := registerTestAccount(t, server, "user@example.com", "TestPassword1")
 	if _, err := server.accountStore().SaveUserSettings("user@example.com", userSettingsUpdatePayload{
 		CloudTunnelEnabled: true,
 		AllowPaths:         []string{accountPath},
@@ -512,7 +786,7 @@ func TestTunnelResolveStartUsesUserPolicy(t *testing.T) {
 			},
 		}),
 	})
-	registerTestAccount(t, server, "user@example.com", "secret123")
+	registerTestAccount(t, server, "user@example.com", "TestPassword1")
 	if _, err := server.accountStore().SaveUserSettings("user@example.com", userSettingsUpdatePayload{
 		CloudTunnelEnabled: true,
 		AllowPaths:         []string{allowed},
@@ -597,7 +871,7 @@ func TestTunnelResolveStartKeepsAgentCommandLogical(t *testing.T) {
 			},
 		}),
 	})
-	registerTestAccount(t, server, "user@example.com", "secret123")
+	registerTestAccount(t, server, "user@example.com", "TestPassword1")
 	if _, err := server.accountStore().SaveUserSettings("user@example.com", userSettingsUpdatePayload{
 		CloudTunnelEnabled: true,
 		AllowPaths:         []string{root},
@@ -733,4 +1007,68 @@ func TestWarmupWorkbenchTreeSkipsHeavyDirs(t *testing.T) {
 	if result.Skipped == 0 {
 		t.Fatal("expected skipped heavy directory")
 	}
+}
+
+type historicalRuntime struct{}
+
+func (historicalRuntime) ParseAndExec(context.Context, edge.ExecRequest, string) edge.ExecResult {
+	return edge.ExecResult{}
+}
+
+func (historicalRuntime) Exec(context.Context, edge.ExecRequest) edge.ExecResult {
+	return edge.ExecResult{}
+}
+
+func (historicalRuntime) ParseAndStartInteractive(context.Context, edge.ExecRequest, string, edge.InteractiveOptions) (InteractiveSession, error) {
+	return nil, errors.New("should not start")
+}
+
+func (historicalRuntime) StartInteractive(context.Context, edge.ExecRequest, edge.InteractiveOptions) (InteractiveSession, error) {
+	return nil, errors.New("should not start")
+}
+
+type resumeRuntime struct {
+	session     *stubInteractiveSession
+	resumeCalls int
+}
+
+func (r *resumeRuntime) ParseAndExec(context.Context, edge.ExecRequest, string) edge.ExecResult {
+	return edge.ExecResult{}
+}
+
+func (r *resumeRuntime) Exec(context.Context, edge.ExecRequest) edge.ExecResult {
+	return edge.ExecResult{}
+}
+
+func (r *resumeRuntime) ParseAndStartInteractive(context.Context, edge.ExecRequest, string, edge.InteractiveOptions) (InteractiveSession, error) {
+	return nil, errors.New("should not start")
+}
+
+func (r *resumeRuntime) StartInteractive(context.Context, edge.ExecRequest, edge.InteractiveOptions) (InteractiveSession, error) {
+	return nil, errors.New("should not start")
+}
+
+func (r *resumeRuntime) ResumeInteractive(context.Context, edge.ExecRequest, edge.InteractiveOptions) (InteractiveSession, error) {
+	r.resumeCalls++
+	return r.session, nil
+}
+
+type stubInteractiveSession struct {
+	writes [][]byte
+	done   chan edge.ExecResult
+}
+
+func (s *stubInteractiveSession) Write(data []byte) error {
+	s.writes = append(s.writes, append([]byte(nil), data...))
+	return nil
+}
+
+func (s *stubInteractiveSession) Resize(uint16, uint16) error {
+	return nil
+}
+
+func (s *stubInteractiveSession) Close() {}
+
+func (s *stubInteractiveSession) Done() <-chan edge.ExecResult {
+	return s.done
 }

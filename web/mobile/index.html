@@ -4,25 +4,41 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <title>xmux</title>
-    <link rel="stylesheet" href="/vendor/xterm.css" />
-    <link rel="stylesheet" href="/mobile/styles.css" />
+    <link rel="stylesheet" href="../vendor/xterm.css" />
+    <link rel="stylesheet" href="styles.css" />
+    <link rel="stylesheet" href="../shared/dialog.css" />
   </head>
   <body>
     <main class="mobile-app">
-      <section id="authView" class="auth-view">
+      <section id="authView" class="auth-view" hidden>
         <form id="authForm" class="auth-box">
-          <div class="auth-mark">xm</div>
-          <h1>xmux</h1>
-          <p>连接电脑上的 AI CLI 会话</p>
+          <div class="auth-logo-area">
+            <div class="auth-mark">xmux</div>
+            <h1>xmux</h1>
+            <p>连接电脑上的 AI CLI 会话</p>
+          </div>
           <div class="auth-tabs" role="tablist" aria-label="登录方式">
             <button id="loginModeButton" class="active" type="button">登录</button>
             <button id="registerModeButton" type="button">注册</button>
           </div>
           <label id="usernameLabel" for="usernameInput">账号</label>
           <input id="usernameInput" autocomplete="username" placeholder="用户名或邮箱" />
+          <label id="registerEmailLabel" for="registerEmailInput" hidden>邮箱</label>
+          <div id="registerEmailRow" class="auth-email-row" hidden>
+            <input id="registerEmailInput" type="email" autocomplete="email" placeholder="用于接收验证码" />
+            <button id="registerSendCodeButton" type="button">发送验证码</button>
+          </div>
+          <label id="registerCodeLabel" for="registerCodeInput" hidden>验证码</label>
+          <input id="registerCodeInput" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="6 位数字验证码" hidden />
           <label id="passwordLabel" for="passwordInput">密码</label>
           <input id="passwordInput" type="password" autocomplete="current-password" placeholder="云端账号密码" />
+          <label id="forgotEmailLabel" for="forgotEmailInput" hidden>邮箱</label>
+          <input id="forgotEmailInput" type="email" autocomplete="email" placeholder="注册时使用的邮箱" hidden />
           <button type="submit">登录</button>
+          <button id="googleAuthButton" class="auth-google" type="button" hidden>使用 Google 登录</button>
+          <div class="auth-aux">
+            <a id="forgotModeLink" href="#" class="auth-link">忘记密码？</a>
+          </div>
           <span id="authMessage" class="auth-message"></span>
         </form>
       </section>
@@ -95,7 +111,7 @@
             <p>终端、文件、Diff 和预览会在穿透客户端在线后开放。</p>
           </div>
           <div class="tunnel-block-actions">
-            <a href="/user/">打开用户后台</a>
+            <a href="../user/">打开用户后台</a>
             <button id="reloadStateButton" type="button">刷新状态</button>
           </div>
         </section>
@@ -130,6 +146,7 @@
             <button type="button" data-key="left">←</button>
             <button type="button" data-key="right">→</button>
             <button type="button" data-key="ctrl-c">Ctrl C</button>
+            <button type="button" data-key="paste" class="key-paste">Ctrl V</button>
             <button type="button" data-key="ctrl-d">Ctrl D</button>
           </div>
         </section>
@@ -169,59 +186,108 @@
         </section>
 
         <section class="tab-page" data-page="settings">
-          <div class="settings-page">
-            <section class="settings-block account-card">
-              <div class="avatar" id="accountAvatar">xm</div>
-              <div>
-                <span>当前账号</span>
-                <strong id="settingsAccount">-</strong>
-                <small id="settingsRole">-</small>
-              </div>
-              <button id="logoutButton" class="ghost" type="button">退出</button>
-            </section>
+          <div class="settings-container">
+            <!-- Settings Main Page -->
+            <div id="settingsMainPage" class="settings-view active">
+              <header class="settings-profile-header" id="accountTrigger">
+                <div class="avatar" id="accountAvatar">xm</div>
+                <div class="profile-info">
+                  <strong id="settingsAccount">-</strong>
+                  <small id="settingsRole">-</small>
+                </div>
+                <div class="chevron-right">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>
+                </div>
+              </header>
 
-            <section class="settings-block">
-              <div class="settings-head">
-                <div>
-                  <span>账号信息</span>
-                  <strong>修改当前账号密码</strong>
-                </div>
-                <button id="togglePasswordButton" class="ghost" type="button">修改密码</button>
-              </div>
-              <div id="passwordForm" class="password-form" hidden>
-                <label class="settings-field">当前密码<input id="currentPasswordInput" type="password" autocomplete="current-password" /></label>
-                <label class="settings-field">新密码<input id="newPasswordInput" type="password" autocomplete="new-password" placeholder="至少 8 位" /></label>
-                <p id="profileMessage" class="settings-message"></p>
-                <div class="password-actions">
-                  <button id="cancelProfileButton" class="ghost" type="button">取消</button>
-                  <button id="saveProfileButton" type="button">保存密码</button>
-                </div>
-              </div>
-              <a class="settings-console-link" href="/user/">进入用户后台管理穿透、命令和路径</a>
-            </section>
+              <nav class="settings-menu">
+                <button type="button" class="menu-item" id="gotoArchiveButton">
+                  <span class="menu-icon">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8v13H3V8"/><path d="M1 3h22v5H1z"/><path d="M10 12h4"/></svg>
+                  </span>
+                  <span class="menu-label">归档管理</span>
+                  <span class="menu-hint" id="archiveCount">0</span>
+                  <div class="chevron-right">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>
+                  </div>
+                </button>
+                <a class="menu-item" href="../user/">
+                  <span class="menu-icon">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+                  </span>
+                  <span class="menu-label">进入用户后台</span>
+                  <div class="chevron-right">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>
+                  </div>
+                </a>
+              </nav>
+            </div>
 
-            <section class="settings-block">
-              <div class="settings-head">
-                <div>
-                  <span>归档</span>
-                  <strong>已归档的文件夹与终端</strong>
-                </div>
-                <button id="toggleArchiveButton" class="ghost" type="button">已归档 <span id="archiveCount">0</span></button>
+            <!-- Account Sub Page -->
+            <div id="settingsAccountPage" class="settings-view" hidden>
+              <header class="sub-page-header">
+                <button type="button" class="back-button" id="backFromAccountButton">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>
+                  返回
+                </button>
+                <h2>个人账号</h2>
+              </header>
+
+              <div class="sub-page-content">
+                <section class="settings-block">
+                  <div class="settings-head">
+                    <div>
+                      <span>账号安全</span>
+                      <strong>修改密码</strong>
+                    </div>
+                    <button id="togglePasswordButton" class="ghost" type="button">修改</button>
+                  </div>
+                  <div id="passwordForm" class="password-form" hidden>
+                    <label class="settings-field">当前密码<input id="currentPasswordInput" type="password" autocomplete="current-password" /></label>
+                    <label class="settings-field">新密码<input id="newPasswordInput" type="password" autocomplete="new-password" placeholder="至少 8 位" /></label>
+                    <p id="profileMessage" class="settings-message"></p>
+                    <div class="password-actions">
+                      <button id="cancelProfileButton" class="ghost" type="button">取消</button>
+                      <button id="saveProfileButton" type="button">保存新密码</button>
+                    </div>
+                  </div>
+                </section>
+
+                <section class="settings-block danger-zone">
+                  <div class="settings-head">
+                    <div>
+                      <span>会话操作</span>
+                      <strong>退出当前登录</strong>
+                    </div>
+                    <button id="logoutButton" class="danger-button" type="button">退出登录</button>
+                  </div>
+                </section>
               </div>
-              <div id="archivePanel" class="archive-panel" hidden>
-                <div class="archive-group">
-                  <span class="archive-label">文件夹</span>
-                  <div id="archivedFoldersList" class="archive-list"></div>
-                </div>
-                <div class="archive-group">
-                  <span class="archive-label">终端会话</span>
-                  <div id="archivedSessionsList" class="archive-list"></div>
-                </div>
-                <div class="password-actions">
-                  <button id="closeArchiveButton" class="ghost" type="button">关闭</button>
+            </div>
+
+            <!-- Archive Sub Page -->
+            <div id="settingsArchivePage" class="settings-view" hidden>
+              <header class="sub-page-header">
+                <button type="button" class="back-button" id="backFromArchiveButton">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>
+                  返回
+                </button>
+                <h2>归档管理</h2>
+              </header>
+
+              <div class="sub-page-content">
+                <div id="archivePanel" class="archive-panel">
+                  <div class="archive-group">
+                    <span class="archive-label">已归档文件夹</span>
+                    <div id="archivedFoldersList" class="archive-list"></div>
+                  </div>
+                  <div class="archive-group">
+                    <span class="archive-label">已归档终端会话</span>
+                    <div id="archivedSessionsList" class="archive-list"></div>
+                  </div>
                 </div>
               </div>
-            </section>
+            </div>
           </div>
         </section>
 
@@ -235,8 +301,10 @@
       </section>
     </main>
 
-    <script src="/vendor/xterm.js"></script>
-    <script src="/vendor/addon-fit.js"></script>
-    <script src="/mobile/app.js"></script>
+    <script src="../vendor/xterm.js"></script>
+    <script src="../vendor/addon-fit.js"></script>
+    <script src="../shared/path.js"></script>
+    <script src="../shared/dialog.js"></script>
+    <script src="app.js"></script>
   </body>
 </html>

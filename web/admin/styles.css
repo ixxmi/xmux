@@ -162,6 +162,101 @@ select:focus {
   color: var(--danger);
 }
 
+.login-message.ok {
+  color: #4ade80;
+}
+
+.login-message.fail {
+  color: var(--danger);
+}
+
+.login-tabs {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 6px;
+  margin-top: 4px;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 10px;
+}
+
+.login-tab {
+  padding: 8px 6px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.login-tab:hover {
+  color: var(--text);
+}
+
+.login-tab.active {
+  border-color: var(--line);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text);
+}
+
+.login-pane {
+  display: grid;
+  gap: 10px;
+}
+
+.login-pane[hidden] {
+  display: none;
+}
+
+.email-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
+.email-row button {
+  min-height: 38px;
+  padding: 0 12px;
+  font-size: 13px;
+}
+
+.login-aux {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: -4px;
+}
+
+.login-link {
+  font-size: 12px;
+  color: var(--muted);
+  text-decoration: none;
+}
+
+.login-link:hover {
+  color: var(--text);
+  text-decoration: underline;
+}
+
+.google-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  background: #fff;
+  color: #1f1f1f;
+  border: 1px solid #dadce0;
+  font-weight: 600;
+}
+
+.google-button:hover {
+  background: #f6f7f9;
+}
+
+.google-button .google-icon {
+  width: 18px;
+  height: 18px;
+}
+
 .login-actions {
   display: grid;
   grid-template-columns: 1fr auto;
@@ -200,11 +295,39 @@ select:focus {
 
 .account-row {
   display: grid;
-  gap: 4px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
   padding: 10px 12px;
   border: 1px solid var(--line-soft);
   border-radius: 8px;
   background: rgba(255, 255, 255, 0.03);
+}
+
+.account-row-main {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.account-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.account-row-actions button {
+  min-height: 30px;
+  padding: 0 10px;
+  font-size: 12px;
+}
+
+.badge.danger {
+  border-color: rgba(255, 115, 106, 0.45);
+  background: rgba(255, 115, 106, 0.18);
+  color: var(--danger);
 }
 
 .account-row span,

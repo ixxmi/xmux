@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>绑定 Google 账号 - xmux</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="login-shell">
+      <form id="bindForm" class="login-box">
+        <div class="login-mark">xm</div>
+        <h1>绑定 Google 账号</h1>
+        <p class="login-hint">这个邮箱已经注册过 xmux 账号。请输入本地密码以完成绑定，下次就能直接用 Google 登录。</p>
+        <label>本地密码<input id="bindPassword" type="password" autocomplete="current-password" placeholder="本地账号密码" /></label>
+        <div class="login-actions">
+          <button type="submit">绑定并登录</button>
+          <a class="link-button" href="login.html">取消</a>
+        </div>
+        <p id="bindMessage" class="login-message"></p>
+      </form>
+    </main>
+    <script src="../shared/path.js"></script>
+    <script src="oauth_bind.js"></script>
+  </body>
+</html>

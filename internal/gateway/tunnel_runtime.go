@@ -116,6 +116,14 @@ func (r *tunnelRuntime) ParseAndStartInteractive(ctx context.Context, req edge.E
 }
 
 func (r *tunnelRuntime) StartInteractive(ctx context.Context, req edge.ExecRequest, _ edge.InteractiveOptions) (InteractiveSession, error) {
+	return r.startInteractive(ctx, req, false)
+}
+
+func (r *tunnelRuntime) ResumeInteractive(ctx context.Context, req edge.ExecRequest, _ edge.InteractiveOptions) (InteractiveSession, error) {
+	return r.startInteractive(ctx, req, true)
+}
+
+func (r *tunnelRuntime) startInteractive(ctx context.Context, req edge.ExecRequest, resumeOnly bool) (InteractiveSession, error) {
 	client := r.clientForAccount(req.User)
 	if client == nil {
 		return nil, tunnelUnavailable()
@@ -144,6 +152,7 @@ func (r *tunnelRuntime) StartInteractive(ctx context.Context, req edge.ExecReque
 		Args:             args,
 		AllowPaths:       slices.Clone(policyCfg.AllowPaths),
 		RequirePathMatch: policyCfg.RequirePathMatch,
+		ResumeOnly:       resumeOnly,
 		Rows:             req.Rows,
 		Cols:             req.Cols,
 	}, &out)
@@ -219,10 +228,14 @@ func isRawAbsPath(value string) bool {
 }
 
 func (s *tunnelInteractiveSession) Write(data []byte) error {
+	return s.WriteWithTitle(data, "")
+}
+
+func (s *tunnelInteractiveSession) WriteWithTitle(data []byte, title string) error {
 	if s == nil || s.client == nil {
 		return errors.New("tunnel session is closed")
 	}
-	return s.client.request(context.Background(), "input", tunnelInputRequest{SessionID: s.sessionID, Data: string(data)}, nil)
+	return s.client.request(context.Background(), "input", tunnelInputRequest{SessionID: s.sessionID, Data: string(data), Title: title}, nil)
 }
 
 func (s *tunnelInteractiveSession) Resize(rows, cols uint16) error {

@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -8,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -49,12 +51,13 @@ type Agent struct {
 	edgeName     string
 	logger       *slog.Logger
 
-	mu       sync.Mutex
-	sessions map[string]*edge.InteractiveSession
-	decoders map[string]*gateway.UTF8StreamDecoder
-	outputs  map[string]func(gateway.TunnelEnvelope) error
-	control  *clientConn
-	meta     map[string]agentSessionMeta
+	mu           sync.Mutex
+	sessions     map[string]*edge.InteractiveSession
+	decoders     map[string]*gateway.UTF8StreamDecoder
+	outputs      map[string]func(gateway.TunnelEnvelope) error
+	control      *clientConn
+	meta         map[string]agentSessionMeta
+	connectCount int
 }
 
 type agentSessionMeta struct {
@@ -66,6 +69,8 @@ type agentSessionMeta struct {
 	WorkDir    string
 	StartedAt  time.Time
 	LastActive time.Time
+	Submitted  bool
+	Title      string
 	Running    bool
 	ExitCode   int
 	Duration   string
@@ -98,25 +103,47 @@ func New(opts Options) *Agent {
 	}
 }
 
+const (
+	agentBackoffMin      = 2 * time.Second
+	agentBackoffMax      = 30 * time.Second
+	agentPingInterval    = 20 * time.Second
+	agentReadTimeout     = 60 * time.Second
+	agentPingWriteLimit  = 10 * time.Second
+	agentWriteTimeout    = 15 * time.Second
+	agentHealthyDuration = 30 * time.Second
+)
+
 func (a *Agent) Run(ctx context.Context) error {
 	if a.runtime == nil || a.config == nil {
 		return errors.New("runtime and config are required")
 	}
+	backoff := agentBackoffMin
 	for {
-		if err := a.runOnce(ctx); err != nil {
+		start := time.Now()
+		err := a.runOnce(ctx)
+		if time.Since(start) >= agentHealthyDuration {
+			backoff = agentBackoffMin
+		}
+		if err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
 			if errors.Is(err, errAlreadyConnected) {
-				a.logger.Warn("agent tunnel rejected: another agent for the same account is already connected; stopping reconnect loop", "error", err)
-				return err
+				a.logger.Warn("agent tunnel rejected as duplicate; will retry", "error", err)
+			} else {
+				a.logger.Warn("agent tunnel disconnected", "error", err)
 			}
-			a.logger.Warn("agent tunnel disconnected", "error", err)
 		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(2 * time.Second):
+		case <-time.After(backoff):
+		}
+		if err != nil {
+			backoff *= 2
+			if backoff > agentBackoffMax {
+				backoff = agentBackoffMax
+			}
 		}
 	}
 }
@@ -147,9 +174,16 @@ func (a *Agent) runOnce(ctx context.Context) error {
 	}
 	defer conn.Close()
 
+	_ = conn.SetReadDeadline(time.Now().Add(agentReadTimeout))
+	conn.SetPongHandler(func(string) error {
+		return conn.SetReadDeadline(time.Now().Add(agentReadTimeout))
+	})
+
 	client := &clientConn{conn: conn}
 	a.mu.Lock()
 	a.control = client
+	a.connectCount++
+	resume := a.connectCount > 1
 	a.mu.Unlock()
 	defer func() {
 		a.mu.Lock()
@@ -158,7 +192,29 @@ func (a *Agent) runOnce(ctx context.Context) error {
 		}
 		a.mu.Unlock()
 	}()
-	if err := client.write(gateway.TunnelEnvelope{Type: "hello", Payload: mustRaw(a.hello())}); err != nil {
+
+	pingDone := make(chan struct{})
+	defer close(pingDone)
+	go func() {
+		ticker := time.NewTicker(agentPingInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-pingDone:
+				return
+			case <-ticker.C:
+				client.writeMu.Lock()
+				_ = conn.SetWriteDeadline(time.Now().Add(agentPingWriteLimit))
+				err := conn.WriteMessage(websocket.PingMessage, nil)
+				client.writeMu.Unlock()
+				if err != nil {
+					return
+				}
+			}
+		}
+	}()
+
+	if err := client.write(gateway.TunnelEnvelope{Type: "hello", Payload: mustRaw(a.hello(resume))}); err != nil {
 		return err
 	}
 	for {
@@ -183,7 +239,12 @@ func (a *Agent) runOnce(ctx context.Context) error {
 		if err := conn.ReadJSON(&env); err != nil {
 			return err
 		}
-		go a.handle(ctx, client, env)
+		switch env.Type {
+		case "input", "resize", "stop":
+			a.handle(ctx, client, env)
+		default:
+			go a.handle(ctx, client, env)
+		}
 	}
 }
 
@@ -277,7 +338,7 @@ func discoveryEndpoint(base string) (string, error) {
 	return u.String(), nil
 }
 
-func (a *Agent) hello() gateway.TunnelHello {
+func (a *Agent) hello(resume bool) gateway.TunnelHello {
 	cfg := a.config.Snapshot()
 	return gateway.TunnelHello{
 		EdgeID:       a.edgeID,
@@ -287,6 +348,7 @@ func (a *Agent) hello() gateway.TunnelHello {
 		PreviewPorts: slices.Clone(cfg.Edge.PreviewPorts),
 		Agents:       gateway.ListWorkbenchAgents(cfg),
 		Sessions:     a.sessionInfos(),
+		Resume:       resume,
 	}
 }
 
@@ -320,7 +382,15 @@ func (a *Agent) handle(ctx context.Context, client *clientConn, env gateway.Tunn
 		}
 		a.mu.Lock()
 		session := a.sessions[req.SessionID]
+		submitted := a.markSessionSubmittedLocked(req.SessionID, req.Title)
 		a.mu.Unlock()
+		if submitted {
+			_ = client.write(gateway.TunnelEnvelope{
+				Type:      "session_submitted",
+				SessionID: req.SessionID,
+				Payload:   mustRaw(gateway.TunnelSessionSubmitted{SessionID: req.SessionID, Title: req.Title}),
+			})
+		}
 		err := errors.New("session not found")
 		if session != nil {
 			err = session.Write([]byte(req.Data))
@@ -379,6 +449,13 @@ func (a *Agent) handle(ctx context.Context, client *clientConn, env gateway.Tunn
 		}
 		out, err := a.diff(ctx, req.WorkDir, req.Path, req.AllowPaths, req.RequirePathMatch)
 		respond(client, env.ID, err, out)
+	case "preview":
+		var req gateway.TunnelPreviewRequest
+		if !decodeAndRespond(client, env, &req) {
+			return
+		}
+		out, err := a.preview(ctx, req)
+		respond(client, env.ID, err, out)
 	default:
 		respond(client, env.ID, fmt.Errorf("unsupported tunnel request %q", env.Type), nil)
 	}
@@ -408,7 +485,14 @@ func (a *Agent) handleStart(ctx context.Context, client *clientConn, env gateway
 			StartedAt:  formatAgentTime(meta.StartedAt),
 			LastActive: formatAgentTime(meta.LastActive),
 			Running:    true,
+			Submitted:  meta.Submitted,
+			Title:      meta.Title,
 		})
+		return
+	}
+	if req.ResumeOnly {
+		a.mu.Unlock()
+		respond(client, env.ID, errors.New("session not found"), nil)
 		return
 	}
 	a.mu.Unlock()
@@ -483,6 +567,7 @@ func (a *Agent) handleStart(ctx context.Context, client *clientConn, env gateway
 		WorkDir:    workDir,
 		StartedAt:  startedAt,
 		LastActive: startedAt,
+		Submitted:  false,
 		Running:    true,
 	}
 	a.mu.Unlock()
@@ -493,6 +578,7 @@ func (a *Agent) handleStart(ctx context.Context, client *clientConn, env gateway
 		StartedAt:  startedAt.Format(time.RFC3339),
 		LastActive: startedAt.Format(time.RFC3339),
 		Running:    true,
+		Submitted:  false,
 	})
 
 	go func() {
@@ -644,6 +730,9 @@ func (a *Agent) sessionInfos() []gateway.WorkbenchSessionInfo {
 	defer a.mu.Unlock()
 	items := make([]gateway.WorkbenchSessionInfo, 0, len(a.meta))
 	for _, meta := range a.meta {
+		if !meta.Submitted {
+			continue
+		}
 		items = append(items, gateway.WorkbenchSessionInfo{
 			ID:         meta.ID,
 			Account:    normalizeTunnelAccount(meta.Account),
@@ -652,6 +741,8 @@ func (a *Agent) sessionInfos() []gateway.WorkbenchSessionInfo {
 			WorkDir:    meta.WorkDir,
 			StartedAt:  formatAgentTime(meta.StartedAt),
 			LastActive: formatAgentTime(meta.LastActive),
+			Submitted:  meta.Submitted,
+			Title:      meta.Title,
 			Running:    meta.Running,
 			ExitCode:   meta.ExitCode,
 			Duration:   meta.Duration,
@@ -662,6 +753,43 @@ func (a *Agent) sessionInfos() []gateway.WorkbenchSessionInfo {
 		return strings.Compare(b.LastActive, a.LastActive)
 	})
 	return items
+}
+
+func (a *Agent) markSessionSubmittedLocked(sessionID string, title string) bool {
+	meta := a.meta[sessionID]
+	if meta.ID == "" || meta.Submitted {
+		return false
+	}
+	title = cleanAgentSessionTitle(title)
+	if title == "" {
+		return false
+	}
+	meta.Submitted = true
+	meta.Title = title
+	meta.LastActive = time.Now()
+	a.meta[sessionID] = meta
+	return true
+}
+
+func cleanAgentSessionTitle(value string) string {
+	fields := strings.FieldsFunc(value, func(r rune) bool {
+		return r == '\r' || r == '\n'
+	})
+	if len(fields) == 0 {
+		return ""
+	}
+	title := strings.TrimSpace(fields[0])
+	title = strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, title)
+	title = strings.Join(strings.Fields(title), " ")
+	if len([]rune(title)) > 60 {
+		return string([]rune(title)[:60])
+	}
+	return title
 }
 
 func (a *Agent) files(path string, allowPaths []string, requirePathMatch bool) (gateway.WorkbenchFilesResponse, error) {
@@ -817,9 +945,119 @@ func (a *Agent) diff(ctx context.Context, workDir string, path string, allowPath
 	return out, nil
 }
 
+const previewBodyMax = 20 << 20
+
+var previewHopByHopHeaders = map[string]struct{}{
+	"connection":          {},
+	"proxy-connection":    {},
+	"keep-alive":          {},
+	"proxy-authenticate":  {},
+	"proxy-authorization": {},
+	"te":                  {},
+	"trailer":             {},
+	"transfer-encoding":   {},
+	"upgrade":             {},
+}
+
+// preview dials 127.0.0.1:port on this agent's host and forwards the request
+// the gateway captured from the user's browser. The port must be in the
+// agent's configured preview_ports list (i.e. announced via hello) — the
+// gateway also enforces this, this is a defense-in-depth re-check.
+func (a *Agent) preview(ctx context.Context, req gateway.TunnelPreviewRequest) (gateway.TunnelPreviewResponse, error) {
+	cfg := a.config.Snapshot()
+	allowed := false
+	for _, port := range cfg.Edge.PreviewPorts {
+		if port == req.Port {
+			allowed = true
+			break
+		}
+	}
+	if !allowed {
+		return gateway.TunnelPreviewResponse{}, fmt.Errorf("preview port %d not allowlisted", req.Port)
+	}
+
+	method := strings.TrimSpace(req.Method)
+	if method == "" {
+		method = http.MethodGet
+	}
+	rawPath := req.Path
+	if rawPath == "" {
+		rawPath = "/"
+	}
+	if !strings.HasPrefix(rawPath, "/") {
+		rawPath = "/" + rawPath
+	}
+
+	target := &url.URL{
+		Scheme: "http",
+		Host:   net.JoinHostPort("127.0.0.1", strconv.Itoa(req.Port)),
+	}
+	if idx := strings.IndexByte(rawPath, '?'); idx >= 0 {
+		target.Path = rawPath[:idx]
+		target.RawQuery = rawPath[idx+1:]
+	} else {
+		target.Path = rawPath
+	}
+
+	var body io.Reader
+	if len(req.Body) > 0 {
+		body = bytes.NewReader(req.Body)
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, method, target.String(), body)
+	if err != nil {
+		return gateway.TunnelPreviewResponse{}, err
+	}
+	for key, values := range req.Headers {
+		lower := strings.ToLower(key)
+		if _, hop := previewHopByHopHeaders[lower]; hop {
+			continue
+		}
+		if lower == "host" || lower == "content-length" {
+			continue
+		}
+		httpReq.Header[key] = append([]string(nil), values...)
+	}
+	httpReq.Host = target.Host
+
+	httpClient := &http.Client{
+		Timeout: 30 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	resp, err := httpClient.Do(httpReq)
+	if err != nil {
+		return gateway.TunnelPreviewResponse{}, err
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, previewBodyMax+1))
+	if err != nil {
+		return gateway.TunnelPreviewResponse{}, err
+	}
+	if int64(len(respBody)) > previewBodyMax {
+		return gateway.TunnelPreviewResponse{}, fmt.Errorf("preview response exceeds %d bytes", previewBodyMax)
+	}
+
+	headers := make(map[string][]string, len(resp.Header))
+	for key, values := range resp.Header {
+		lower := strings.ToLower(key)
+		if _, hop := previewHopByHopHeaders[lower]; hop {
+			continue
+		}
+		headers[key] = append([]string(nil), values...)
+	}
+	return gateway.TunnelPreviewResponse{
+		Status:  resp.StatusCode,
+		Headers: headers,
+		Body:    respBody,
+	}, nil
+}
+
 func (c *clientConn) write(env gateway.TunnelEnvelope) error {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
+	_ = c.conn.SetWriteDeadline(time.Now().Add(agentWriteTimeout))
 	return c.conn.WriteJSON(env)
 }
 

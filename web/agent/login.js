@@ -3,6 +3,7 @@ const usernameInput = document.getElementById("usernameInput");
 const passwordInput = document.getElementById("passwordInput");
 const message = document.getElementById("loginMessage");
 const cloudHint = document.getElementById("cloudHint");
+const appPath = window.XMuxPath?.path || ((path) => path);
 
 usernameInput.focus();
 
@@ -10,7 +11,7 @@ loadAgentConfig();
 
 async function loadAgentConfig() {
   try {
-    const cfg = await (await fetch("/cloud-terminal-api/agent/config")).json();
+    const cfg = await (await fetch(appPath("/cloud-terminal-api/agent/config"))).json();
     const cloud = cfg.discovery_url || cfg.gateway_url || "";
     if (cloud) {
       cloudHint.textContent = "云端网关：" + cloud;
@@ -31,7 +32,7 @@ form.addEventListener("submit", async (event) => {
   setBusy(true);
   message.textContent = "验证中...";
   try {
-    const response = await fetch("/cloud-terminal-api/accounts/login", {
+    const response = await fetch(appPath("/cloud-terminal-api/accounts/login"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ username, password }),
@@ -40,7 +41,7 @@ form.addEventListener("submit", async (event) => {
     if (!response.ok) {
       throw new Error(await response.text());
     }
-    window.location.href = "/agent/";
+    window.location.href = appPath("/agent/");
   } catch (error) {
     message.textContent = cleanError(error.message || "登录失败");
   } finally {

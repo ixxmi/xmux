@@ -9,7 +9,13 @@
   const FORGOTTEN_SESSION_KEY = "cloud-terminal-mobile-forgotten-sessions";
   const SESSION_NAME_KEY = "cloud-terminal-mobile-session-names";
   const ACTIVE_AGENT_KEY = "cloud-terminal-mobile-agent";
-  const MOBILE_SYMBOLS = "~!@#$%^&*()_+-=[]{}\\|;:'\",.<>/?`！￥……（）【】《》、，。？；：‘’“”·—";
+  const MOBILE_SYMBOLS = "~!@#$%^&*()_+-=[]{}\\|;:'\",.<>/?`！￥……（）【】《》、，。？；：‘’“”·— 　";
+  const FULLWIDTH_SPACE = "　";
+  const appPath = window.XMuxPath?.path || ((path) => path);
+  const websocketURL = window.XMuxPath?.websocketURL || ((path) => {
+    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    return `${protocol}//${window.location.host}${path}`;
+  });
 
   const mobileApp = document.querySelector(".mobile-app");
   const authView = document.getElementById("authView");
@@ -18,10 +24,20 @@
   const authForm = document.getElementById("authForm");
   const loginModeButton = document.getElementById("loginModeButton");
   const registerModeButton = document.getElementById("registerModeButton");
+  const forgotModeLink = document.getElementById("forgotModeLink");
+  const googleAuthButton = document.getElementById("googleAuthButton");
   const usernameLabel = document.getElementById("usernameLabel");
   const usernameInput = document.getElementById("usernameInput");
   const passwordLabel = document.getElementById("passwordLabel");
   const passwordInput = document.getElementById("passwordInput");
+  const forgotEmailLabel = document.getElementById("forgotEmailLabel");
+  const forgotEmailInput = document.getElementById("forgotEmailInput");
+  const registerEmailLabel = document.getElementById("registerEmailLabel");
+  const registerEmailInput = document.getElementById("registerEmailInput");
+  const registerEmailRow = document.getElementById("registerEmailRow");
+  const registerCodeLabel = document.getElementById("registerCodeLabel");
+  const registerCodeInput = document.getElementById("registerCodeInput");
+  const registerSendCodeButton = document.getElementById("registerSendCodeButton");
   const authMessage = document.getElementById("authMessage");
   const connectionState = document.getElementById("connectionState");
   const sessionButton = document.getElementById("sessionButton");
@@ -44,6 +60,7 @@
   const terminalPage = document.getElementById("terminalPage");
   const terminalEl = document.getElementById("terminal");
   const keybar = document.getElementById("keybar");
+  const quickbar = document.getElementById("quickbar");
   const bottomTabs = document.getElementById("bottomTabs");
   const reconnectButton = document.getElementById("reconnectButton");
   const newSessionButton = document.getElementById("newSessionButton");
@@ -82,21 +99,26 @@
   const togglePasswordButton = document.getElementById("togglePasswordButton");
   const cancelProfileButton = document.getElementById("cancelProfileButton");
   const passwordForm = document.getElementById("passwordForm");
-  const toggleArchiveButton = document.getElementById("toggleArchiveButton");
-  const closeArchiveButton = document.getElementById("closeArchiveButton");
-  const archivePanel = document.getElementById("archivePanel");
   const archiveCountEl = document.getElementById("archiveCount");
   const archivedFoldersList = document.getElementById("archivedFoldersList");
   const archivedSessionsList = document.getElementById("archivedSessionsList");
+
+  const settingsMainPage = document.getElementById("settingsMainPage");
+  const settingsAccountPage = document.getElementById("settingsAccountPage");
+  const settingsArchivePage = document.getElementById("settingsArchivePage");
+  const accountTrigger = document.getElementById("accountTrigger");
+  const gotoArchiveButton = document.getElementById("gotoArchiveButton");
+  const backFromAccountButton = document.getElementById("backFromAccountButton");
+  const backFromArchiveButton = document.getElementById("backFromArchiveButton");
 
   let state = null;
   let currentAccount = null;
   let terminal = null;
   let fitAddon = null;
   let socket = null;
-  let sessionID = localStorage.getItem(SESSION_KEY) || "";
-  let selectedTarget = readSavedTarget();
-  let selectedAgent = normalizeAgentID(localStorage.getItem(ACTIVE_AGENT_KEY) || "codex");
+  let sessionID = "";
+  let selectedTarget = null;
+  let selectedAgent = "codex";
   let currentPath = "";
   let targetPath = "";
   let targetParent = "";
@@ -108,19 +130,40 @@
   let reconnectAttempts = 0;
   let socketSeq = 0;
   let agentStarted = false;
+  let workbenchTabsEnabled = false;
   let sessions = [];
-  let processFolders = readSavedFolders();
-  let folderSessions = migrateFolderSessions(readObject(FOLDER_SESSION_KEY));
-  let archivedFolders = readStringSet(ARCHIVED_FOLDER_KEY);
-  let archivedSessions = readStringSet(ARCHIVED_SESSION_KEY);
-  let forgottenFolders = readStringSet(FORGOTTEN_FOLDER_KEY);
-  let forgottenSessions = readStringSet(FORGOTTEN_SESSION_KEY);
-  let sessionNames = readObject(SESSION_NAME_KEY) || {};
+  let processFolders = [];
+  let folderSessions = {};
+  let archivedFolders = new Set();
+  let archivedSessions = new Set();
+  let forgottenFolders = new Set();
+  let forgottenSessions = new Set();
+  let sessionNames = {};
+  let quickCommands = [];
+  let quickCommandsLoaded = false;
+  let quickCommandsSaveTimer = 0;
   const sessionInputBuffers = new Map();
+  const submittedSessions = new Set();
   let processPanelOpen = false;
+
+  function initUserContext() {
+    sessionID = localStorage.getItem(userKey(SESSION_KEY)) || "";
+    selectedAgent = normalizeAgentID(localStorage.getItem(userKey(ACTIVE_AGENT_KEY)) || "codex");
+    processFolders = readSavedFolders();
+    folderSessions = migrateFolderSessions(readObject(FOLDER_SESSION_KEY));
+    archivedFolders = readStringSet(ARCHIVED_FOLDER_KEY);
+    archivedSessions = readStringSet(ARCHIVED_SESSION_KEY);
+    forgottenFolders = readStringSet(FORGOTTEN_FOLDER_KEY);
+    forgottenSessions = readStringSet(FORGOTTEN_SESSION_KEY);
+    sessionNames = readObject(SESSION_NAME_KEY) || {};
+    selectedTarget = readSavedTarget();
+  }
   let folderPickerOpen = false;
   let folderPickerParent = "";
   let newTerminalFolder = "";
+  let pendingContinuationInput = "";
+  let continuingHistoricalSession = false;
+  let archiveSyncTimer = 0;
   let lastXtermInput = { data: "", at: 0 };
   const busyTimers = new Map();
 
@@ -141,6 +184,32 @@
 
   authForm.addEventListener("submit", async (event) => {
     event.preventDefault();
+    if (authMode === "forgot") {
+      const email = forgotEmailInput.value.trim();
+      if (!email) {
+        setAuthMessage("请填写邮箱");
+        return;
+      }
+      setAuthBusy(true);
+      setAuthMessage("提交中...");
+      try {
+        const response = await fetch(appPath("/cloud-terminal-api/accounts/forgot-password"), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "same-origin",
+          body: JSON.stringify({ email }),
+        });
+        if (!response.ok) {
+          throw new Error(await response.text());
+        }
+        setAuthMessage("如该邮箱存在，已发送重置链接，请查收。");
+      } catch (error) {
+        setAuthMessage(error.message || "提交失败");
+      } finally {
+        setAuthBusy(false);
+      }
+      return;
+    }
     const username = usernameInput.value.trim();
     const password = passwordInput.value;
     if (!username || !password) {
@@ -150,9 +219,25 @@
     setAuthBusy(true);
     setAuthMessage("Verifying...");
     try {
-      const result = authMode === "register" ? await registerAccount(username, password) : await loginAccount(username, password);
-      currentAccount = { username: result.username || username, role: result.role || "user" };
-      state = result.state || result;
+      if (authMode === "register") {
+        const email = registerEmailInput ? registerEmailInput.value.trim() : "";
+        const code = registerCodeInput ? registerCodeInput.value.trim() : "";
+        if (!email) {
+          setAuthMessage("请填写邮箱");
+          return;
+        }
+        if (!code) {
+          setAuthMessage("请填写邮箱验证码");
+          return;
+        }
+        const outcome = await registerAccount(username, password, email, code);
+        currentAccount = { username: outcome.username || username, role: outcome.role || "user" };
+        state = outcome.state || outcome;
+      } else {
+        const result = await loginAccount(username, password);
+        currentAccount = { username: result.username || username, role: result.role || "user" };
+        state = result.state || result;
+      }
       passwordInput.value = "";
       showWorkbench();
     } catch (error) {
@@ -164,6 +249,55 @@
 
   loginModeButton.addEventListener("click", () => setAuthMode("login"));
   registerModeButton.addEventListener("click", () => setAuthMode("register"));
+  if (forgotModeLink) {
+    forgotModeLink.addEventListener("click", (event) => {
+      event.preventDefault();
+      setAuthMode(authMode === "forgot" ? "login" : "forgot");
+    });
+  }
+  if (googleAuthButton) {
+    googleAuthButton.innerHTML = mobileGoogleButtonContent();
+    googleAuthButton.addEventListener("click", () => {
+      const startURL = googleStartURL("/mobile/");
+      console.log("[OAUTH-CLIENT] google button clicked", { start_url: startURL });
+      window.location.href = startURL;
+    });
+  }
+  if (registerSendCodeButton) {
+    let codeCooldownTimer = 0;
+    registerSendCodeButton.addEventListener("click", async () => {
+      const email = registerEmailInput ? registerEmailInput.value.trim() : "";
+      if (!email) {
+        setAuthMessage("请先填写邮箱");
+        registerEmailInput?.focus();
+        return;
+      }
+      registerSendCodeButton.disabled = true;
+      setAuthMessage("验证码发送中...");
+      try {
+        await requestRegistrationCode(email);
+        setAuthMessage("验证码已发送，请到邮箱查收（10 分钟内有效）");
+        let remaining = 60;
+        const original = "发送验证码";
+        window.clearInterval(codeCooldownTimer);
+        registerSendCodeButton.textContent = `${remaining}s`;
+        codeCooldownTimer = window.setInterval(() => {
+          remaining -= 1;
+          if (remaining <= 0) {
+            window.clearInterval(codeCooldownTimer);
+            registerSendCodeButton.disabled = false;
+            registerSendCodeButton.textContent = original;
+          } else {
+            registerSendCodeButton.textContent = `${remaining}s`;
+          }
+        }, 1000);
+      } catch (error) {
+        setAuthMessage(error.message || "验证码发送失败");
+        registerSendCodeButton.disabled = false;
+      }
+    });
+  }
+  loadMobilePublicConfig();
 
   startAgentButton.addEventListener("click", async () => {
     if (tunnelUnavailableForUser()) {
@@ -186,6 +320,15 @@
 
   reconnectButton.addEventListener("click", () => {
     closeActionMenu();
+    const existing = currentSession();
+    if (existing && existing.running === false) {
+      if (existing.work_dir) {
+        openFolderSession(existing.work_dir, existing.agent || selectedAgent, true);
+      } else {
+        showTargetPicker();
+      }
+      return;
+    }
     if (tunnelUnavailableForUser()) {
       showTunnelBlocked();
       return;
@@ -206,18 +349,24 @@
   stopSessionButton.addEventListener("click", () => {
     closeActionMenu();
     if (socket && socket.readyState === WebSocket.OPEN) {
+      if (currentSession()?.running === false) {
+        return;
+      }
       socket.send(JSON.stringify({ type: "stop" }));
       setConnection("Stopping");
-      markSessionDone(sessionID);
-      upsertSession({
-        id: sessionID,
-        agent: currentSession()?.agent || selectedAgent,
-        agent_label: currentSession()?.agent_label || agentLabel(selectedAgent),
-        work_dir: currentSession()?.work_dir || currentPath || activeWorkDir(),
-        running: false,
-        busy: false,
-        last_active: new Date().toISOString()
-      });
+      if (submittedSessions.has(sessionID) || currentSession()?.submitted) {
+        markSessionDone(sessionID);
+        upsertSession({
+          id: sessionID,
+          agent: currentSession()?.agent || selectedAgent,
+          agent_label: currentSession()?.agent_label || agentLabel(selectedAgent),
+          work_dir: currentSession()?.work_dir || currentPath || activeWorkDir(),
+          submitted: true,
+          running: false,
+          busy: false,
+          last_active: new Date().toISOString()
+        });
+      }
     }
   });
 
@@ -281,17 +430,25 @@
 
   cancelProfileButton.addEventListener("click", () => closePasswordForm());
 
-  toggleArchiveButton.addEventListener("click", () => {
-    if (archivePanel.hidden) {
-      renderArchivePanel();
-      archivePanel.hidden = false;
-    } else {
-      archivePanel.hidden = true;
-    }
+  accountTrigger.addEventListener("click", () => {
+    settingsMainPage.hidden = true;
+    settingsAccountPage.hidden = false;
   });
 
-  closeArchiveButton.addEventListener("click", () => {
-    archivePanel.hidden = true;
+  gotoArchiveButton.addEventListener("click", () => {
+    renderArchivePanel();
+    settingsMainPage.hidden = true;
+    settingsArchivePage.hidden = false;
+  });
+
+  backFromAccountButton.addEventListener("click", () => {
+    settingsAccountPage.hidden = true;
+    settingsMainPage.hidden = false;
+  });
+
+  backFromArchiveButton.addEventListener("click", () => {
+    settingsArchivePage.hidden = true;
+    settingsMainPage.hidden = false;
   });
 
   menuButton.addEventListener("click", (event) => {
@@ -319,6 +476,8 @@
   targetParentButton.addEventListener("click", () => {
     if (targetParent) {
       loadTargetFiles(targetParent);
+    } else {
+      renderAccessibleRoots();
     }
   });
 
@@ -386,15 +545,16 @@
   });
 
   async function bootstrap() {
-    usernameInput.focus();
     try {
       const account = await fetchJSON("/cloud-terminal-api/accounts/me", null, 5000);
       currentAccount = { username: account.username, role: account.role || "user" };
+      initUserContext();
       state = await fetchJSON("/cloud-terminal-api/workbench/state", null, 5000);
       showWorkbench();
     } catch {
       authView.hidden = false;
       workbenchView.hidden = true;
+      usernameInput.focus();
     }
   }
 
@@ -402,13 +562,74 @@
     authMode = mode;
     loginModeButton.classList.toggle("active", mode === "login");
     registerModeButton.classList.toggle("active", mode === "register");
-    usernameLabel.hidden = false;
-    usernameInput.hidden = false;
-    passwordLabel.hidden = false;
-    passwordInput.hidden = false;
-    authForm.querySelector("button[type='submit']").textContent = mode === "register" ? "创建账号" : "登录";
+    if (forgotModeLink) {
+      forgotModeLink.textContent = mode === "forgot" ? "返回登录" : "忘记密码？";
+    }
+    const credentialsHidden = mode === "forgot";
+    usernameLabel.hidden = credentialsHidden;
+    usernameInput.hidden = credentialsHidden;
+    passwordLabel.hidden = credentialsHidden;
+    passwordInput.hidden = credentialsHidden;
+    if (forgotEmailLabel && forgotEmailInput) {
+      forgotEmailLabel.hidden = !credentialsHidden;
+      forgotEmailInput.hidden = !credentialsHidden;
+    }
+    if (registerEmailLabel && registerEmailRow) {
+      const showEmail = mode === "register";
+      registerEmailLabel.hidden = !showEmail;
+      registerEmailRow.hidden = !showEmail;
+      if (registerCodeLabel) registerCodeLabel.hidden = !showEmail;
+      if (registerCodeInput) registerCodeInput.hidden = !showEmail;
+    }
+    const submit = authForm.querySelector("button[type='submit']");
+    if (mode === "register") {
+      submit.textContent = "创建账号";
+    } else if (mode === "forgot") {
+      submit.textContent = "发送重置链接";
+    } else {
+      submit.textContent = "登录";
+    }
+    if (googleAuthButton) {
+      googleAuthButton.hidden = mode !== "login" || !googleAuthButton.dataset.enabled;
+    }
     setAuthMessage("");
-    usernameInput.focus();
+    if (mode === "forgot") {
+      forgotEmailInput?.focus();
+    } else {
+      usernameInput.focus();
+    }
+  }
+
+  async function loadMobilePublicConfig() {
+    if (!googleAuthButton) {
+      return;
+    }
+    try {
+      const response = await fetch(appPath("/cloud-terminal-api/auth/public-config"), { credentials: "same-origin" });
+      if (response.ok) {
+        const cfg = await response.json();
+        if (cfg.oauth_google_enabled) {
+          googleAuthButton.dataset.enabled = "1";
+          googleAuthButton.hidden = authMode !== "login";
+        }
+      }
+    } catch (_) {
+      /* ignore */
+    }
+  }
+
+  function mobileGoogleButtonContent() {
+    return `<svg viewBox="0 0 24 24" aria-hidden="true">
+      <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.75h3.57c2.08-1.92 3.28-4.74 3.28-8.07z"/>
+      <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.75c-.99.66-2.25 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
+      <path fill="#FBBC05" d="M5.84 14.09a6.93 6.93 0 0 1 0-4.18V7.07H2.18a11 11 0 0 0 0 9.86l3.66-2.84z"/>
+      <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84C6.71 7.31 9.14 5.38 12 5.38z"/>
+    </svg><span>使用 Google 登录</span>`;
+  }
+
+  function googleStartURL(returnPath) {
+    const params = new URLSearchParams({ return_to: appPath(returnPath) });
+    return `${appPath("/cloud-terminal-api/accounts/oauth/google/start")}?${params.toString()}`;
   }
 
   async function loginAccount(username, password) {
@@ -419,12 +640,52 @@
     }, 8000);
   }
 
-  async function registerAccount(username, password) {
-    return fetchJSON("/cloud-terminal-api/accounts/register", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ username, password })
-    }, 8000);
+  async function registerAccount(username, password, email, code) {
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => controller.abort(), 8000);
+    let response;
+    try {
+      response = await fetch(appPath("/cloud-terminal-api/accounts/register"), {
+        method: "POST",
+        credentials: "same-origin",
+        signal: controller.signal,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username, password, email, code }),
+      });
+    } catch (error) {
+      if (error.name === "AbortError") {
+        throw new Error("Request timeout.");
+      }
+      throw error;
+    } finally {
+      window.clearTimeout(timer);
+    }
+    if (!response.ok) {
+      const detail = (await response.text()).trim();
+      throw new Error(detail || `HTTP ${response.status}`);
+    }
+    return response.json();
+  }
+
+  async function requestRegistrationCode(email) {
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => controller.abort(), 8000);
+    try {
+      const response = await fetch(appPath("/cloud-terminal-api/accounts/register/send-code"), {
+        method: "POST",
+        credentials: "same-origin",
+        signal: controller.signal,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email }),
+      });
+      if (!response.ok) {
+        const detail = (await response.text()).trim();
+        throw new Error(detail || `HTTP ${response.status}`);
+      }
+      return response.json();
+    } finally {
+      window.clearTimeout(timer);
+    }
   }
 
   async function logoutAccount() {
@@ -433,8 +694,13 @@
     sessionID = "";
     state = null;
     currentAccount = null;
-    localStorage.removeItem(SESSION_KEY);
-    localStorage.removeItem(TARGET_KEY);
+    quickCommands = [];
+    quickCommandsLoaded = false;
+    if (quickbar) {
+      quickbar.innerHTML = "";
+    }
+    localStorage.removeItem(userKey(SESSION_KEY));
+    localStorage.removeItem(userKey(TARGET_KEY));
     authView.hidden = false;
     workbenchView.hidden = true;
     passwordInput.value = "";
@@ -448,6 +714,7 @@
     settingsAccount.textContent = username;
     settingsRole.textContent = role === "admin" ? "管理员" : "用户";
     accountAvatar.textContent = avatarText(username);
+    updateArchiveCount();
   }
 
   async function saveProfile() {
@@ -481,7 +748,10 @@
   async function refreshWorkbenchState() {
     try {
       state = await fetchJSON("/cloud-terminal-api/workbench/state", null, 5000);
-      sessions = (Array.isArray(state.sessions) ? state.sessions : []).filter((item) => !forgottenSessions.has(item.id));
+      applyArchiveState(state);
+      sessions = normalizeStateSessions(state.sessions);
+      hydrateArchivedSessionMetadata(state.archived_session_items);
+      syncFoldersFromSessions();
       ensureSelectedAgent();
       renderAgentSelector();
       renderPreviewPorts();
@@ -496,7 +766,10 @@
   function showWorkbench() {
     authView.hidden = true;
     workbenchView.hidden = false;
-    sessions = (Array.isArray(state.sessions) ? state.sessions : []).filter((item) => !forgottenSessions.has(item.id));
+    initUserContext();
+    applyArchiveState(state);
+    sessions = normalizeStateSessions(state.sessions);
+    hydrateArchivedSessionMetadata(state?.archived_session_items);
     ensureSelectedAgent();
     reconcileSavedTargetWithState();
     currentPath = selectedTarget?.workDir || state.work_dir;
@@ -506,6 +779,7 @@
     renderPreviewPorts();
     renderProcessList();
     renderSettingsShell();
+    loadQuickCommandsOnce();
     if (tunnelUnavailableForUser()) {
       showTunnelBlocked();
       return;
@@ -523,12 +797,65 @@
     showTargetPicker();
   }
 
+  function normalizeStateSessions(items) {
+    submittedSessions.clear();
+    return (Array.isArray(items) ? items : [])
+      .filter((item) => item && item.submitted !== false && !forgottenSessions.has(item.id))
+      .map((item) => {
+        submittedSessions.add(item.id);
+        return Object.assign({ submitted: true }, item);
+      });
+  }
+
+  function applyArchiveState(nextState) {
+    if (!nextState || typeof nextState !== "object") {
+      return;
+    }
+    archivedFolders = mergeRemoteSet(ARCHIVED_FOLDER_KEY, archivedFolders, nextState.archived_folders, true);
+    archivedSessions = mergeRemoteSet(ARCHIVED_SESSION_KEY, archivedSessions, nextState.archived_sessions, false);
+    forgottenFolders = mergeRemoteSet(FORGOTTEN_FOLDER_KEY, forgottenFolders, nextState.forgotten_folders, true);
+    forgottenSessions = mergeRemoteSet(FORGOTTEN_SESSION_KEY, forgottenSessions, nextState.forgotten_sessions, false);
+    for (const folder of forgottenFolders) {
+      archivedFolders.delete(folder);
+    }
+    for (const id of forgottenSessions) {
+      archivedSessions.delete(id);
+    }
+    persistArchiveState();
+    updateArchiveCount();
+  }
+
+  function mergeRemoteSet(key, local, remote, paths) {
+    const merged = new Set(local || []);
+    for (const item of Array.isArray(remote) ? remote : []) {
+      const value = paths ? normalizeArchivePath(item) : normalizeArchiveID(item);
+      if (value) {
+        merged.add(value);
+      }
+    }
+    persistSet(key, merged);
+    return merged;
+  }
+
+  function hydrateArchivedSessionMetadata(items) {
+    if (!Array.isArray(items)) {
+      return;
+    }
+    for (const item of items) {
+      if (!item?.id || sessions.some((session) => session.id === item.id)) {
+        continue;
+      }
+      sessions.push(Object.assign({ submitted: true, running: false }, item));
+    }
+  }
+
   function showTargetPicker() {
     agentStarted = false;
     tunnelBlockedView.hidden = true;
     targetView.hidden = false;
     terminalPage.hidden = true;
     keybar.hidden = true;
+    if (quickbar) quickbar.hidden = true;
     bottomTabs.hidden = false;
     setActivePage("terminal");
     setActiveTabButton("terminal");
@@ -538,9 +865,8 @@
     renderAgentSelector();
     updateSelectedTarget();
     renderAccessibleRoots();
-    if (selectedTarget?.workDir || state?.work_dir) {
-      loadTargetFiles(selectedTarget?.workDir || state?.work_dir || "");
-    } else {
+    const roots = Array.isArray(state?.allow_paths) ? state.allow_paths : [];
+    if (roots.length === 0) {
       targetSelection.textContent = "请先在用户后台配置允许访问路径";
       startAgentButton.disabled = true;
     }
@@ -551,6 +877,7 @@
     targetView.hidden = true;
     terminalPage.hidden = false;
     keybar.hidden = false;
+    if (quickbar) quickbar.hidden = false;
     bottomTabs.hidden = false;
     updateProcessPanelVisibility();
     setWorkbenchTabsEnabled(true);
@@ -561,7 +888,7 @@
     closeActionMenu();
     agentStarted = false;
     sessionID = "";
-    localStorage.removeItem(SESSION_KEY);
+    localStorage.removeItem(userKey(SESSION_KEY));
     processPanelOpen = false;
     folderPickerOpen = false;
     newTerminalFolder = "";
@@ -570,6 +897,7 @@
     tunnelBlockedView.hidden = false;
     terminalPage.hidden = true;
     keybar.hidden = true;
+    if (quickbar) quickbar.hidden = true;
     bottomTabs.hidden = false;
     activeTab = "terminal";
     setActivePage("terminal");
@@ -616,9 +944,9 @@
   function openFolderSession(folder, agentOverride, forceNew = false) {
     const nextAgent = normalizeAgentID(agentOverride || selectedAgent);
     selectedAgent = nextAgent;
-    localStorage.setItem(ACTIVE_AGENT_KEY, selectedAgent);
+    localStorage.setItem(userKey(ACTIVE_AGENT_KEY), selectedAgent);
     selectedTarget = { kind: "dir", path: folder, workDir: folder, label: folder };
-    localStorage.setItem(TARGET_KEY, JSON.stringify(selectedTarget));
+    localStorage.setItem(userKey(TARGET_KEY), JSON.stringify(selectedTarget));
     workspacePath.textContent = folder;
     currentPath = folder;
     if (forceNew) {
@@ -668,7 +996,7 @@
     }
     closeSocketOnly();
     sessionID = id;
-    localStorage.setItem(SESSION_KEY, sessionID);
+    localStorage.setItem(userKey(SESSION_KEY), sessionID);
     const next = sessions.find((item) => item.id === id);
     if (next?.work_dir) {
       currentPath = next.work_dir;
@@ -676,7 +1004,7 @@
     }
     if (next?.agent) {
       selectedAgent = normalizeAgentID(next.agent);
-      localStorage.setItem(ACTIVE_AGENT_KEY, selectedAgent);
+      localStorage.setItem(userKey(ACTIVE_AGENT_KEY), selectedAgent);
       renderAgentSelector();
     }
     restoreSession();
@@ -721,10 +1049,16 @@
     terminal.loadAddon(fitAddon);
     terminal.open(terminalEl);
     terminal.onData((data) => {
-      lastXtermInput = { data, at: Date.now() };
-      sendInput(data);
+      const normalized = normalizeFullwidthSpace(data);
+      lastXtermInput = { data: normalized, at: Date.now() };
+      sendInput(normalized);
     });
-    terminal.onWriteParsed(() => scrollTerminalToBottom());
+    terminal.onWriteParsed(() => {
+      const buffer = terminal.buffer?.active;
+      if (!buffer || buffer.viewportY >= buffer.baseY) {
+        scrollTerminalToBottom();
+      }
+    });
     installMobileInputFallback();
     fitTerminal();
   }
@@ -761,8 +1095,7 @@
         }
       }
     }
-    const protocol = window.location.protocol === "https:" ? "wss" : "ws";
-    socket = new WebSocket(`${protocol}://${window.location.host}/cloud-terminal-api/ws/workbench?${params.toString()}`);
+    socket = new WebSocket(websocketURL(`/cloud-terminal-api/ws/workbench?${params.toString()}`));
     manualClose = false;
 
     socket.addEventListener("message", (event) => {
@@ -815,28 +1148,37 @@
         sessionID = msg.session_id;
         const readyAgent = normalizeAgentID(msg.agent || currentSession()?.agent || selectedAgent);
         selectedAgent = readyAgent;
-        localStorage.setItem(ACTIVE_AGENT_KEY, selectedAgent);
-        localStorage.setItem(SESSION_KEY, sessionID);
+        localStorage.setItem(userKey(ACTIVE_AGENT_KEY), selectedAgent);
+        localStorage.setItem(userKey(SESSION_KEY), sessionID);
         sessionButton.textContent = shortSession(sessionID);
-        const previous = currentSession();
-        upsertSession({
-          id: sessionID,
-          agent: readyAgent,
-          agent_label: msg.agent_label || previous?.agent_label || agentLabel(readyAgent),
-          work_dir: msg.work_dir || selectedTarget?.workDir || state?.work_dir || "",
-          running: msg.running !== false,
-          busy: previous?.busy || false,
-          last_active: msg.last_active || new Date().toISOString(),
-          started_at: msg.started_at || ""
-        });
+        if (msg.submitted) {
+          submittedSessions.add(sessionID);
+          upsertSession(sessionPayloadFromMessage(msg, {
+            agent: readyAgent,
+            running: msg.running !== false,
+            busy: currentSession()?.busy || false
+          }));
+        }
         workspacePath.textContent = msg.work_dir || selectedTarget?.label || state?.work_dir || "";
         currentPath = msg.work_dir || currentPath;
         terminal.reset();
-        setConnection(msg.running === false ? "Finished" : "Attached");
+        setConnection(msg.running === false ? "History" : "Attached");
+        updateSessionControls();
         renderAgentSelector();
         renderProcessList();
         fitTerminal();
         scrollTerminalToBottom();
+        flushPendingContinuationInput();
+        break;
+      case "submitted":
+        sessionID = msg.session_id || sessionID;
+        localStorage.setItem(userKey(SESSION_KEY), sessionID);
+        submittedSessions.add(sessionID);
+        upsertSession(sessionPayloadFromMessage(msg, {
+          running: msg.running !== false,
+          busy: true
+        }));
+        setSessionNameFromTitle(sessionID, msg.title);
         break;
       case "replay":
         writeTerminal(msg.data || "");
@@ -848,25 +1190,31 @@
         scrollTerminalToBottom();
         break;
       case "exit":
-        setConnection("Finished");
-        stopSessionButton.disabled = true;
-        markSessionDone(sessionID);
-        upsertSession({
-          id: sessionID,
-          agent: currentSession()?.agent || selectedAgent,
-          agent_label: currentSession()?.agent_label || agentLabel(selectedAgent),
-          work_dir: currentSession()?.work_dir || currentPath || selectedTarget?.workDir || "",
-          running: false,
-          busy: false,
-          exit_code: msg.exit_code ?? 0,
-          duration: msg.duration || "",
-          error: msg.error || "",
-          last_active: new Date().toISOString()
-        });
-        writeTerminal(`\r\n\x1b[33m[${agentLabel(currentSession()?.agent || selectedAgent)} exit ${msg.exit_code ?? 0}] ${msg.duration || ""}\x1b[0m\r\n`);
-        if (msg.error) {
+        const historicalExit = currentSession()?.running === false;
+        setConnection(historicalExit ? "History" : "Finished");
+        if (!historicalExit && (submittedSessions.has(sessionID) || currentSession()?.submitted)) {
+          markSessionDone(sessionID);
+          upsertSession({
+            id: sessionID,
+            agent: currentSession()?.agent || selectedAgent,
+            agent_label: currentSession()?.agent_label || agentLabel(selectedAgent),
+            work_dir: currentSession()?.work_dir || currentPath || selectedTarget?.workDir || "",
+            submitted: true,
+            running: false,
+            busy: false,
+            exit_code: msg.exit_code ?? 0,
+            duration: msg.duration || "",
+            error: msg.error || "",
+            last_active: new Date().toISOString()
+          });
+        }
+        if (!historicalExit) {
+          writeTerminal(`\r\n\x1b[33m[${agentLabel(currentSession()?.agent || selectedAgent)} exit ${msg.exit_code ?? 0}] ${msg.duration || ""}\x1b[0m\r\n`);
+        }
+        if (msg.error && !historicalExit) {
           writeTerminal(`\x1b[31m${msg.error}\x1b[0m\r\n`);
         }
+        updateSessionControls();
         break;
       case "error":
         writeTerminal(`\r\n\x1b[31m${msg.error || "error"}\x1b[0m\r\n`);
@@ -891,7 +1239,7 @@
       targetPath = data.path;
       targetParent = data.parent;
       targetCurrentPath.textContent = data.path;
-      targetParentButton.disabled = !data.parent;
+      targetParentButton.disabled = false; // Always allow going back to roots
       renderTargetList(data.entries || [], data.path);
     } catch (error) {
       targetFileList.innerHTML = `<div class="empty">${escapeHTML(error.message || "Load failed")}</div>`;
@@ -1060,10 +1408,9 @@
       workDir,
       label: entry.is_dir ? entry.path : entry.path
     };
-    localStorage.setItem(TARGET_KEY, JSON.stringify(selectedTarget));
+    localStorage.setItem(userKey(TARGET_KEY), JSON.stringify(selectedTarget));
     workspacePath.textContent = selectedTarget.label;
     currentPath = selectedTarget.workDir;
-    addProcessFolder(selectedTarget.workDir, false, true);
     updateSelectedTarget();
     renderTargetSelectionInList();
   }
@@ -1094,12 +1441,14 @@
   function renderProcessList() {
     updateProcessPanelVisibility();
     processButton.classList.toggle("active", processPanelOpen);
-    const busyCount = sessions.filter((item) => item.busy).length;
-    processSummary.textContent = `${busyCount} 执行中 / ${sessions.length} 会话`;
     processList.innerHTML = "";
     const roots = Array.isArray(state?.allow_paths) ? state.allow_paths : [];
     const folders = (processFolders.length > 0 ? processFolders : inferFoldersFromSessions())
       .filter((folder) => !archivedFolders.has(folder));
+    const visibleFolderSet = new Set(folders);
+    const summaryVisibleSessions = sessions.filter((item) => !archivedSessions.has(item.id) && visibleFolderSet.has(item.work_dir));
+    const summaryActive = summaryVisibleSessions.filter((item) => item.running !== false).length;
+    processSummary.textContent = `${summaryActive} 执行中 / ${summaryVisibleSessions.length} 会话`;
     if (folders.length === 0) {
       if (roots.length === 0) {
         processList.innerHTML = '<div class="process-empty">用户后台未配置允许访问路径。</div>';
@@ -1114,7 +1463,7 @@
       group.title = folder;
       const folderItems = sessions.filter((item) => item.work_dir === folder);
       const visibleSessions = folderItems.filter((item) => !archivedSessions.has(item.id));
-      const activeCount = visibleSessions.filter((item) => item.busy).length;
+      const activeCount = visibleSessions.filter((item) => item.running !== false).length;
       group.innerHTML = `
         <div class="folder-head">
           <span class="folder-icon">${folderIcon()}</span>
@@ -1192,7 +1541,7 @@
           <span class="agent-chip mini">${escapeHTML(agentShortLabel(item.agent))}</span>
           <span class="session-name" data-session-id="${escapeHTML(item.id)}">${escapeHTML(displayName)}</span>
         </strong>
-        <small>${escapeHTML(item.duration || item.last_active || "")}</small>
+        <small>${escapeHTML(item.duration || formatSessionTime(item.last_active))}</small>
       </span>
       <span class="process-status"></span>
       <span class="process-actions">
@@ -1225,9 +1574,45 @@
     }
     const explicit = sessionNames[item.id];
     if (explicit && explicit.trim()) {
-      return explicit.trim();
+      return sanitizeSessionTitle(explicit) || shortSessionID(item.id);
+    }
+    if (item.title && String(item.title).trim()) {
+      return sanitizeSessionTitle(item.title) || shortSessionID(item.id);
     }
     return shortSessionID(item.id);
+  }
+
+  function sanitizeSessionTitle(value) {
+    let text = stripAnsi(String(value || ""));
+    text = text.replace(/[\x00-\x1F\x7F]/g, "");
+    text = text.replace(/[​-‏‪-‮⁠﻿]/g, "");
+    text = text.replace(/[─-◿]/g, "");
+    text = text.replace(/\s+/g, " ").trim();
+    return text.length > 60 ? text.slice(0, 60) : text;
+  }
+
+  function formatSessionTime(value) {
+    if (!value) {
+      return "";
+    }
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) {
+      return String(value);
+    }
+    const pad = (n) => String(n).padStart(2, "0");
+    const now = new Date();
+    const sameDay = date.getFullYear() === now.getFullYear()
+      && date.getMonth() === now.getMonth()
+      && date.getDate() === now.getDate();
+    const time = `${pad(date.getHours())}:${pad(date.getMinutes())}`;
+    if (sameDay) {
+      return time;
+    }
+    const sameYear = date.getFullYear() === now.getFullYear();
+    const datePart = sameYear
+      ? `${pad(date.getMonth() + 1)}-${pad(date.getDate())}`
+      : `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+    return `${datePart} ${time}`;
   }
 
   function beginRenameSession(container, item) {
@@ -1258,7 +1643,7 @@
         } else {
           delete sessionNames[item.id];
         }
-        localStorage.setItem(SESSION_NAME_KEY, JSON.stringify(sessionNames));
+        localStorage.setItem(userKey(SESSION_NAME_KEY), JSON.stringify(sessionNames));
       }
       renderProcessList();
     };
@@ -1291,7 +1676,7 @@
       const candidate = combined.trim();
       if (candidate.length >= 2) {
         sessionNames[targetSessionID] = candidate.length > 40 ? candidate.slice(0, 40) + "…" : candidate;
-        localStorage.setItem(SESSION_NAME_KEY, JSON.stringify(sessionNames));
+        localStorage.setItem(userKey(SESSION_NAME_KEY), JSON.stringify(sessionNames));
         renderProcessList();
       }
       sessionInputBuffers.delete(targetSessionID);
@@ -1300,15 +1685,53 @@
     sessionInputBuffers.set(targetSessionID, combined);
   }
 
+  function sessionPayloadFromMessage(msg, overrides = {}) {
+    const id = msg.session_id || sessionID;
+    const previous = sessions.find((item) => item.id === id) || {};
+    const agent = normalizeAgentID(msg.agent || overrides.agent || previous.agent || selectedAgent);
+    return Object.assign({
+      id,
+      agent,
+      agent_label: msg.agent_label || previous.agent_label || agentLabel(agent),
+      work_dir: msg.work_dir || previous.work_dir || currentPath || selectedTarget?.workDir || state?.work_dir || "",
+      running: msg.running !== false,
+      busy: previous.busy || false,
+      submitted: msg.submitted !== false,
+      title: msg.title || previous.title || "",
+      last_active: msg.last_active || new Date().toISOString(),
+      started_at: msg.started_at || previous.started_at || ""
+    }, overrides);
+  }
+
+  function setSessionNameFromTitle(id, title) {
+    const clean = sanitizeSessionTitle(title);
+    if (!id || !clean || sessionNames[id]) {
+      return;
+    }
+    sessionNames[id] = clean;
+    localStorage.setItem(userKey(SESSION_NAME_KEY), JSON.stringify(sessionNames));
+    renderProcessList();
+  }
+
   function upsertSession(next) {
     if (!next || !next.id) {
       return;
     }
+    if (!next.submitted && !submittedSessions.has(next.id)) {
+      return;
+    }
+    submittedSessions.add(next.id);
     if (forgottenSessions.has(next.id)) {
       return;
     }
-    next.agent = normalizeAgentID(next.agent || currentSession()?.agent || selectedAgent);
-    next.agent_label = next.agent_label || agentLabel(next.agent);
+    const existing = sessions.find((item) => item.id === next.id) || null;
+    next.agent = normalizeAgentID(next.agent || existing?.agent || (next.id === sessionID ? selectedAgent : ""));
+    if (!next.agent_label) {
+      next.agent_label = existing?.agent_label || agentLabel(next.agent);
+    }
+    if (!next.work_dir && existing?.work_dir) {
+      next.work_dir = existing.work_dir;
+    }
     if (next.work_dir) {
       addProcessFolder(next.work_dir, false);
       if (next.running !== false) {
@@ -1316,7 +1739,7 @@
       } else if (folderSessionID(next.work_dir, next.agent) === next.id) {
         forgetFolderSession(next.work_dir, next.agent);
       }
-      localStorage.setItem(FOLDER_SESSION_KEY, JSON.stringify(folderSessions));
+      localStorage.setItem(userKey(FOLDER_SESSION_KEY), JSON.stringify(folderSessions));
     }
     const index = sessions.findIndex((item) => item.id === next.id);
     if (index >= 0) {
@@ -1332,12 +1755,18 @@
     if (!id) {
       return;
     }
+    const target = sessions.find((item) => item.id === id);
+    if (!submittedSessions.has(id) && !target?.submitted) {
+      return;
+    }
     window.clearTimeout(busyTimers.get(id));
+    const isCurrent = id === sessionID;
     upsertSession({
       id,
-      agent: currentSession()?.agent || selectedAgent,
-      agent_label: currentSession()?.agent_label || agentLabel(selectedAgent),
-      work_dir: currentSession()?.work_dir || currentPath || activeWorkDir(),
+      agent: target?.agent || (isCurrent ? selectedAgent : undefined),
+      agent_label: target?.agent_label || (isCurrent ? agentLabel(selectedAgent) : undefined),
+      work_dir: target?.work_dir || (isCurrent ? (currentPath || activeWorkDir()) : ""),
+      submitted: true,
       busy: true,
       last_active: new Date().toISOString()
     });
@@ -1345,7 +1774,11 @@
   }
 
   function noteSessionOutput(id, data) {
-    if (!id || !currentSession()?.busy) {
+    if (!id) {
+      return;
+    }
+    const target = sessions.find((item) => item.id === id);
+    if (!target?.busy) {
       return;
     }
     window.clearTimeout(busyTimers.get(id));
@@ -1362,11 +1795,17 @@
     }
     window.clearTimeout(busyTimers.get(id));
     busyTimers.delete(id);
+    const target = sessions.find((item) => item.id === id);
+    if (!submittedSessions.has(id) && !target?.submitted) {
+      return;
+    }
+    const isCurrent = id === sessionID;
     upsertSession({
       id,
-      agent: currentSession()?.agent || selectedAgent,
-      agent_label: currentSession()?.agent_label || agentLabel(selectedAgent),
-      work_dir: currentSession()?.work_dir || currentPath || activeWorkDir(),
+      agent: target?.agent || (isCurrent ? selectedAgent : undefined),
+      agent_label: target?.agent_label || (isCurrent ? agentLabel(selectedAgent) : undefined),
+      work_dir: target?.work_dir || (isCurrent ? (currentPath || activeWorkDir()) : ""),
+      submitted: true,
       busy: false,
       last_active: new Date().toISOString()
     });
@@ -1401,9 +1840,9 @@
     }
     if (unarchive) {
       archivedFolders.delete(path);
-      persistSet(ARCHIVED_FOLDER_KEY, archivedFolders);
       forgottenFolders.delete(path);
-      persistSet(FORGOTTEN_FOLDER_KEY, forgottenFolders);
+      persistArchiveState();
+      syncArchiveState();
     } else if (archivedFolders.has(path) || forgottenFolders.has(path)) {
       return;
     }
@@ -1418,87 +1857,86 @@
   }
 
   function archiveFolder(path) {
+    path = normalizeArchivePath(path);
     if (!path) {
       return;
     }
     archivedFolders.add(path);
-    persistSet(ARCHIVED_FOLDER_KEY, archivedFolders);
+    forgottenFolders.delete(path);
+    persistArchiveState();
+    syncArchiveState();
     renderProcessList();
     updateArchiveCount();
   }
 
   function unarchiveFolder(path) {
+    path = normalizeArchivePath(path);
     if (!path) {
       return;
     }
     archivedFolders.delete(path);
-    persistSet(ARCHIVED_FOLDER_KEY, archivedFolders);
     forgottenFolders.delete(path);
-    persistSet(FORGOTTEN_FOLDER_KEY, forgottenFolders);
+    persistArchiveState();
+    syncArchiveState();
     if (!processFolders.includes(path)) {
       processFolders.unshift(path);
       localStorage.setItem(folderKey(), JSON.stringify(processFolders.slice(0, 30)));
     }
     renderProcessList();
-    if (!archivePanel.hidden) {
-      renderArchivePanel();
-    }
+    renderArchivePanel();
     updateArchiveCount();
   }
 
   function deleteArchivedFolder(path) {
+    path = normalizeArchivePath(path);
     if (!path) {
       return;
     }
     archivedFolders.delete(path);
-    persistSet(ARCHIVED_FOLDER_KEY, archivedFolders);
     forgottenFolders.add(path);
-    persistSet(FORGOTTEN_FOLDER_KEY, forgottenFolders);
+    persistArchiveState();
+    syncArchiveState();
     const idx = processFolders.indexOf(path);
     if (idx >= 0) {
       processFolders.splice(idx, 1);
       localStorage.setItem(folderKey(), JSON.stringify(processFolders.slice(0, 30)));
     }
     renderProcessList();
-    if (!archivePanel.hidden) {
-      renderArchivePanel();
-    }
+    renderArchivePanel();
     updateArchiveCount();
   }
 
   function unarchiveSession(id) {
+    id = normalizeArchiveID(id);
     if (!id) {
       return;
     }
     archivedSessions.delete(id);
-    persistSet(ARCHIVED_SESSION_KEY, archivedSessions);
     forgottenSessions.delete(id);
-    persistSet(FORGOTTEN_SESSION_KEY, forgottenSessions);
+    persistArchiveState();
+    syncArchiveState();
     renderProcessList();
-    if (!archivePanel.hidden) {
-      renderArchivePanel();
-    }
+    renderArchivePanel();
     updateArchiveCount();
   }
 
   function deleteArchivedSession(id) {
+    id = normalizeArchiveID(id);
     if (!id) {
       return;
     }
     archivedSessions.delete(id);
-    persistSet(ARCHIVED_SESSION_KEY, archivedSessions);
     forgottenSessions.add(id);
-    persistSet(FORGOTTEN_SESSION_KEY, forgottenSessions);
+    persistArchiveState();
+    syncArchiveState();
     const idx = sessions.findIndex((item) => item.id === id);
     if (idx >= 0) {
       sessions.splice(idx, 1);
     }
     delete sessionNames[id];
-    localStorage.setItem(SESSION_NAME_KEY, JSON.stringify(sessionNames));
+    localStorage.setItem(userKey(SESSION_NAME_KEY), JSON.stringify(sessionNames));
     renderProcessList();
-    if (!archivePanel.hidden) {
-      renderArchivePanel();
-    }
+    renderArchivePanel();
     updateArchiveCount();
   }
 
@@ -1508,7 +1946,6 @@
     }
     const total = archivedFolders.size + archivedSessions.size;
     archiveCountEl.textContent = total === 0 ? "0" : String(total);
-    toggleArchiveButton.disabled = total === 0;
   }
 
   function renderArchivePanel() {
@@ -1567,21 +2004,74 @@
     }
   }
 
+  function persistArchiveState() {
+    for (const folder of forgottenFolders) {
+      archivedFolders.delete(folder);
+    }
+    for (const id of forgottenSessions) {
+      archivedSessions.delete(id);
+    }
+    persistSet(ARCHIVED_FOLDER_KEY, archivedFolders);
+    persistSet(ARCHIVED_SESSION_KEY, archivedSessions);
+    persistSet(FORGOTTEN_FOLDER_KEY, forgottenFolders);
+    persistSet(FORGOTTEN_SESSION_KEY, forgottenSessions);
+    if (state) {
+      state.archived_folders = Array.from(archivedFolders);
+      state.archived_sessions = Array.from(archivedSessions);
+      state.forgotten_folders = Array.from(forgottenFolders);
+      state.forgotten_sessions = Array.from(forgottenSessions);
+    }
+  }
+
+  function syncArchiveState() {
+    window.clearTimeout(archiveSyncTimer);
+    archiveSyncTimer = window.setTimeout(async () => {
+      try {
+        const updated = await fetchJSON("/cloud-terminal-api/user/archive", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            archived_folders: Array.from(archivedFolders),
+            archived_sessions: Array.from(archivedSessions),
+            forgotten_folders: Array.from(forgottenFolders),
+            forgotten_sessions: Array.from(forgottenSessions)
+          })
+        }, 8000);
+        applyArchiveState(updated);
+        await refreshWorkbenchState();
+      } catch (error) {
+        profileMessage.textContent = error.message || "归档同步失败";
+        profileMessage.className = "settings-message error";
+      }
+    }, 150);
+  }
+
+  function normalizeArchivePath(value) {
+    return String(value || "").trim();
+  }
+
+  function normalizeArchiveID(value) {
+    return String(value || "").trim();
+  }
+
   function archiveSession(id) {
+    id = normalizeArchiveID(id);
     if (!id) {
       return;
     }
     const archived = sessions.find((item) => item.id === id);
     archivedSessions.add(id);
-    persistSet(ARCHIVED_SESSION_KEY, archivedSessions);
+    forgottenSessions.delete(id);
+    persistArchiveState();
+    syncArchiveState();
     if (archived?.work_dir && folderSessionID(archived.work_dir, archived.agent) === id) {
       forgetFolderSession(archived.work_dir, archived.agent);
-      localStorage.setItem(FOLDER_SESSION_KEY, JSON.stringify(folderSessions));
+      localStorage.setItem(userKey(FOLDER_SESSION_KEY), JSON.stringify(folderSessions));
     }
     if (id === sessionID) {
       closeSocketOnly();
       sessionID = "";
-      localStorage.removeItem(SESSION_KEY);
+      localStorage.removeItem(userKey(SESSION_KEY));
       sessionButton.textContent = "No session";
       agentStarted = false;
     }
@@ -1623,26 +2113,105 @@
   }
 
   function sendInput(data) {
+    if (!data) {
+      return;
+    }
+    if (currentSession()?.running === false) {
+      continueFromHistoricalSession(data);
+      return;
+    }
+    if (continuingHistoricalSession) {
+      pendingContinuationInput += data;
+      return;
+    }
+    sendLiveInput(data);
+  }
+
+  function sendLiveInput(data) {
     if (!socket || socket.readyState !== WebSocket.OPEN) {
       return;
     }
-    if (data === "\r" || data === "\n") {
+    if (currentSession()?.running === false) {
+      return;
+    }
+    if ((submittedSessions.has(sessionID) || currentSession()?.submitted) && (data === "\r" || data === "\n")) {
       markSessionSubmitted(sessionID);
     } else if (data === "\u0003" || data === "\u0004") {
       markSessionDone(sessionID);
     }
-    recordFirstInput(sessionID, data);
+    if (submittedSessions.has(sessionID) || currentSession()?.submitted) {
+      recordFirstInput(sessionID, data);
+    }
     socket.send(JSON.stringify({ type: "input", data }));
+  }
+
+  function continueFromHistoricalSession(data) {
+    const previous = currentSession();
+    const workDir = previous?.work_dir || currentPath || activeWorkDir();
+    if (!workDir || !isMeaningfulContinuationInput(data)) {
+      return;
+    }
+    const agent = normalizeAgentID(previous?.agent || selectedAgent);
+    if (!agentEnabled(agent)) {
+      writeTerminalError(`${agentLabel(agent)} 未在后台命令策略中启用`);
+      return;
+    }
+    if (tunnelUnavailableForUser()) {
+      showTunnelBlocked();
+      return;
+    }
+
+    pendingContinuationInput += data;
+    continuingHistoricalSession = true;
+    selectedAgent = agent;
+    localStorage.setItem(userKey(ACTIVE_AGENT_KEY), selectedAgent);
+    selectedTarget = { kind: "dir", path: workDir, workDir, label: workDir };
+    localStorage.setItem(userKey(TARGET_KEY), JSON.stringify(selectedTarget));
+    currentPath = workDir;
+    workspacePath.textContent = workDir;
+    closeSocketOnly();
+    sessionID = "";
+    agentStarted = true;
+    hideTargetPicker();
+    initTerminal();
+    activateTab("terminal");
+    connect(true, selectedTarget);
+    loadFiles(currentPath);
+    loadDiff("");
+  }
+
+  function flushPendingContinuationInput() {
+    if (!continuingHistoricalSession || !pendingContinuationInput || currentSession()?.running === false) {
+      return;
+    }
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      return;
+    }
+    const data = pendingContinuationInput;
+    pendingContinuationInput = "";
+    continuingHistoricalSession = false;
+    sendLiveInput(data);
+  }
+
+  function isMeaningfulContinuationInput(data) {
+    return /[^\x00-\x20\x7f]/.test(String(data || ""));
   }
 
   function sendResize() {
     if (!socket || socket.readyState !== WebSocket.OPEN || !terminal) {
       return;
     }
+    if (currentSession()?.running === false) {
+      return;
+    }
     socket.send(JSON.stringify({ type: "resize", rows: terminal.rows, cols: terminal.cols }));
   }
 
   function sendShortcut(key) {
+    if (key === "paste") {
+      pasteFromClipboard();
+      return;
+    }
     const values = {
       esc: "\u001b",
       tab: "\t",
@@ -1655,6 +2224,158 @@
     };
     sendInput(values[key] || "");
     terminal.focus();
+  }
+
+  function quickCommandLabel(item) {
+    const label = String(item?.label || "").trim();
+    if (label) {
+      return label;
+    }
+    const cmd = String(item?.command || "").trim();
+    if (cmd.length <= 18) {
+      return cmd;
+    }
+    return cmd.slice(0, 16) + "…";
+  }
+
+  function renderQuickbar() {
+    if (!quickbar) {
+      return;
+    }
+    quickbar.innerHTML = "";
+    quickCommands.forEach((item, index) => {
+      if (!item || !item.command) {
+        return;
+      }
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.textContent = quickCommandLabel(item);
+      btn.title = item.command;
+      btn.dataset.quickIndex = String(index);
+      attachQuickCommandHandlers(btn, index);
+      quickbar.appendChild(btn);
+    });
+  }
+
+  async function pasteFromClipboard() {
+    let text = "";
+    try {
+      if (navigator.clipboard && navigator.clipboard.readText) {
+        text = await navigator.clipboard.readText();
+      }
+    } catch (_) {
+      text = "";
+    }
+    if (!text) {
+      const fallback = await XDialog.prompt("粘贴内容到终端", "", { title: "粘贴", okText: "粘贴" });
+      if (fallback === null) {
+        return;
+      }
+      text = fallback;
+    }
+    if (!text) {
+      return;
+    }
+    sendInput(text);
+    try {
+      terminal?.focus();
+    } catch (_) {
+      /* ignore */
+    }
+  }
+
+  function attachQuickCommandHandlers(btn, index) {
+    let pressTimer = 0;
+    let longPressed = false;
+    const startPress = () => {
+      longPressed = false;
+      window.clearTimeout(pressTimer);
+      pressTimer = window.setTimeout(() => {
+        longPressed = true;
+        btn.classList.add("deleting");
+        confirmRemoveQuickCommand(index);
+        window.setTimeout(() => btn.classList.remove("deleting"), 200);
+      }, 550);
+    };
+    const cancelPress = () => {
+      window.clearTimeout(pressTimer);
+      pressTimer = 0;
+    };
+    btn.addEventListener("touchstart", startPress, { passive: true });
+    btn.addEventListener("touchend", cancelPress);
+    btn.addEventListener("touchcancel", cancelPress);
+    btn.addEventListener("touchmove", cancelPress);
+    btn.addEventListener("mousedown", startPress);
+    btn.addEventListener("mouseup", cancelPress);
+    btn.addEventListener("mouseleave", cancelPress);
+    btn.addEventListener("click", (event) => {
+      if (longPressed) {
+        event.preventDefault();
+        return;
+      }
+      const item = quickCommands[index];
+      if (!item || !item.command) {
+        return;
+      }
+      sendInput(item.command);
+      try {
+        terminal?.focus();
+      } catch (_) {
+        /* ignore */
+      }
+    });
+  }
+
+  async function confirmRemoveQuickCommand(index) {
+    const item = quickCommands[index];
+    if (!item) {
+      return;
+    }
+    const display = quickCommandLabel(item) || item.command;
+    const ok = await XDialog.confirm(`删除「${display}」？`, { title: "删除常用指令", okText: "删除", danger: true });
+    if (!ok) {
+      return;
+    }
+    quickCommands.splice(index, 1);
+    renderQuickbar();
+    scheduleSaveQuickCommands();
+  }
+
+  function scheduleSaveQuickCommands() {
+    window.clearTimeout(quickCommandsSaveTimer);
+    quickCommandsSaveTimer = window.setTimeout(saveQuickCommandsNow, 200);
+  }
+
+  async function saveQuickCommandsNow() {
+    try {
+      const updated = await fetchJSON("/cloud-terminal-api/user/quick-commands", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ quick_commands: quickCommands })
+      }, 6000);
+      if (Array.isArray(updated?.quick_commands)) {
+        quickCommands = updated.quick_commands.filter((item) => item && item.command);
+        renderQuickbar();
+      }
+    } catch (error) {
+      console.warn("save quick commands failed", error);
+    }
+  }
+
+  async function loadQuickCommandsOnce() {
+    if (quickCommandsLoaded) {
+      return;
+    }
+    quickCommandsLoaded = true;
+    try {
+      const settings = await fetchJSON("/cloud-terminal-api/user/settings", null, 6000);
+      const list = Array.isArray(settings?.quick_commands) ? settings.quick_commands : [];
+      quickCommands = list.filter((item) => item && item.command);
+    } catch (error) {
+      console.warn("load quick commands failed", error);
+      quickCommands = [];
+    }
+    renderQuickbar();
   }
 
   function installMobileInputFallback() {
@@ -1685,7 +2406,7 @@
         return;
       }
       event.preventDefault();
-      sendInput(data);
+      sendInput(normalizeFullwidthSpace(data));
       textarea.value = "";
     });
     textarea.addEventListener("input", () => {
@@ -1693,11 +2414,15 @@
         return;
       }
       const data = textarea.value || "";
-      if (data && isMobileSymbolInput(data) && !recentXtermInput(data)) {
-        sendInput(data);
+      if (data && !recentXtermInput(data)) {
+        sendInput(normalizeFullwidthSpace(data));
       }
       textarea.value = "";
     });
+  }
+
+  function normalizeFullwidthSpace(value) {
+    return value.includes(FULLWIDTH_SPACE) ? value.replace(/　/g, " ") : value;
   }
 
   function isMobileSymbolInput(value) {
@@ -1895,7 +2620,7 @@
     const timer = window.setTimeout(() => controller.abort(), timeout);
     let response;
     try {
-      response = await fetch(url, Object.assign({ credentials: "same-origin", signal: controller.signal }, options || {}));
+      response = await fetch(appPath(url), Object.assign({ credentials: "same-origin", signal: controller.signal }, options || {}));
     } catch (error) {
       if (error.name === "AbortError") {
         throw new Error("Request timeout.");
@@ -1924,6 +2649,7 @@
       targetView.hidden = false;
       terminalPage.hidden = true;
       keybar.hidden = true;
+      if (quickbar) quickbar.hidden = true;
       activeTab = "terminal";
       setActivePage("terminal");
       setActiveTabButton("terminal");
@@ -1934,6 +2660,14 @@
       targetView.hidden = true;
       terminalPage.hidden = true;
       keybar.hidden = true;
+      if (quickbar) quickbar.hidden = true;
+      settingsMainPage.hidden = false;
+      settingsAccountPage.hidden = true;
+      settingsArchivePage.hidden = true;
+      activeTab = tab;
+      setActivePage(tab);
+      setActiveTabButton(tab);
+      return;
     }
     activeTab = tab;
     setActivePage(tab);
@@ -1944,6 +2678,11 @@
         terminal.focus();
         scrollTerminalToBottom();
       }
+    }
+    if (tab === "settings") {
+      settingsMainPage.hidden = false;
+      settingsAccountPage.hidden = true;
+      settingsArchivePage.hidden = true;
     }
     if (tab === "files") {
       if (currentPath) {
@@ -1985,7 +2724,7 @@
   function setConnection(value) {
     connectionState.textContent = value;
     connectionState.dataset.state = value.toLowerCase();
-    stopSessionButton.disabled = value === "Finished" || value === "Detached" || value === "Choose target";
+    updateSessionControls();
   }
 
   function setActiveTabButton(tab) {
@@ -2013,6 +2752,7 @@
   }
 
   function setWorkbenchTabsEnabled(enabled) {
+    workbenchTabsEnabled = enabled;
     document.querySelectorAll("[data-tab]").forEach((button) => {
       const tab = button.dataset.tab;
       // Terminal and Settings remain reachable even before a session has started,
@@ -2024,6 +2764,15 @@
     stopSessionButton.disabled = !enabled || !sessionID;
     newSessionButton.disabled = !enabled;
     processButton.disabled = !enabled;
+    updateSessionControls();
+  }
+
+  function updateSessionControls() {
+    const status = connectionState.textContent;
+    const historical = currentSession()?.running === false;
+    const hasSession = Boolean(sessionID);
+    stopSessionButton.disabled = !hasSession || historical || status === "Finished" || status === "Detached" || status === "Choose target";
+    reconnectButton.disabled = !workbenchTabsEnabled || !hasSession;
   }
 
   function renderAgentSelector() {
@@ -2067,12 +2816,12 @@
     if (!availableAgents().some((agent) => agent.id === selectedAgent)) {
       selectedAgent = "codex";
     }
-    localStorage.setItem(ACTIVE_AGENT_KEY, selectedAgent);
+    localStorage.setItem(userKey(ACTIVE_AGENT_KEY), selectedAgent);
   }
 
   function setSelectedAgent(agent) {
     selectedAgent = normalizeAgentID(agent);
-    localStorage.setItem(ACTIVE_AGENT_KEY, selectedAgent);
+    localStorage.setItem(userKey(ACTIVE_AGENT_KEY), selectedAgent);
     renderAgentSelector();
     renderProcessList();
   }
@@ -2254,9 +3003,19 @@
     return path.slice(0, index);
   }
 
+  function folderKey() {
+    const user = currentAccount?.username || "default";
+    return `${FOLDER_KEY}-${user}`;
+  }
+
+  function userKey(baseKey) {
+    const user = currentAccount?.username || "default";
+    return `${baseKey}-${user}`;
+  }
+
   function readSavedTarget() {
     try {
-      const value = JSON.parse(localStorage.getItem(TARGET_KEY) || "null");
+      const value = JSON.parse(localStorage.getItem(userKey(TARGET_KEY)) || "null");
       return value && value.path && value.workDir ? value : null;
     } catch {
       return null;
@@ -2267,14 +3026,14 @@
     if (selectedTarget && pathAllowedByState(selectedTarget.workDir)) {
       return;
     }
-    const firstRoot = Array.isArray(state?.allow_paths) ? state.allow_paths[0] : "";
+    const firstRoot = (Array.isArray(state?.allow_paths) ? state.allow_paths : []).find((root) => !archivedFolders.has(root) && !forgottenFolders.has(root)) || "";
     if (firstRoot) {
       selectedTarget = { kind: "dir", path: firstRoot, workDir: firstRoot, label: firstRoot };
-      localStorage.setItem(TARGET_KEY, JSON.stringify(selectedTarget));
+      localStorage.setItem(userKey(TARGET_KEY), JSON.stringify(selectedTarget));
       return;
     }
     selectedTarget = null;
-    localStorage.removeItem(TARGET_KEY);
+    localStorage.removeItem(userKey(TARGET_KEY));
   }
 
   function pathAllowedByState(path) {
@@ -2299,13 +3058,9 @@
     }
   }
 
-  function folderKey() {
-    return FOLDER_KEY;
-  }
-
   function readStringSet(key) {
     try {
-      const value = JSON.parse(localStorage.getItem(key) || "[]");
+      const value = JSON.parse(localStorage.getItem(userKey(key)) || "[]");
       return new Set(Array.isArray(value) ? value.filter((item) => typeof item === "string" && item.trim()) : []);
     } catch {
       return new Set();
@@ -2314,7 +3069,7 @@
 
   function readObject(key) {
     try {
-      const value = JSON.parse(localStorage.getItem(key) || "{}");
+      const value = JSON.parse(localStorage.getItem(userKey(key)) || "{}");
       return value && typeof value === "object" && !Array.isArray(value) ? value : {};
     } catch {
       return {};
@@ -2322,7 +3077,11 @@
   }
 
   function persistSet(key, value) {
-    localStorage.setItem(key, JSON.stringify(Array.from(value)));
+    localStorage.setItem(userKey(key), JSON.stringify(Array.from(value)));
+  }
+
+  function persistObject(key, value) {
+    localStorage.setItem(userKey(key), JSON.stringify(value));
   }
 
   function lines(values) {

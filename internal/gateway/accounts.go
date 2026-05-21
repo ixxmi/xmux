@@ -35,23 +35,28 @@ const (
 )
 
 type accountStore struct {
-	mu           sync.RWMutex
-	path         string
-	legacyPath   string
-	enabled      bool
-	adminAccount string
-	accounts     map[string]accountRecord
-	sessions     map[string]accountSession
-	userSettings map[string]userSettings
-	db           *sql.DB
+	mu             sync.RWMutex
+	path           string
+	legacyPath     string
+	enabled        bool
+	adminAccount   string
+	accounts       map[string]accountRecord
+	sessions       map[string]accountSession
+	userSettings   map[string]userSettings
+	db             *sql.DB
+	policyResolver func() passwordPolicy
 }
 
 type accountRecord struct {
-	Username     string    `json:"username"`
-	Role         string    `json:"role"`
-	PasswordHash string    `json:"password_hash"`
-	CreatedAt    time.Time `json:"created_at"`
-	LastLoginAt  time.Time `json:"last_login_at,omitempty"`
+	Username        string    `json:"username"`
+	Role            string    `json:"role"`
+	PasswordHash    string    `json:"password_hash"`
+	CreatedAt       time.Time `json:"created_at"`
+	LastLoginAt     time.Time `json:"last_login_at,omitempty"`
+	Email           string    `json:"email,omitempty"`
+	EmailVerified   bool      `json:"email_verified,omitempty"`
+	EmailVerifiedAt time.Time `json:"email_verified_at,omitempty"`
+	Disabled        bool      `json:"disabled,omitempty"`
 }
 
 type accountSession struct {
@@ -62,17 +67,21 @@ type accountSession struct {
 }
 
 type accountStoreFile struct {
-	Version  int                       `json:"version"`
-	Updated  time.Time                 `json:"updated"`
-	Accounts map[string]accountRecord  `json:"accounts"`
-	Sessions map[string]accountSession `json:"sessions"`
+	Version      int                       `json:"version"`
+	Updated      time.Time                 `json:"updated"`
+	Accounts     map[string]accountRecord  `json:"accounts"`
+	Sessions     map[string]accountSession `json:"sessions"`
+	UserSettings map[string]userSettings   `json:"user_settings,omitempty"`
 }
 
 type accountPublicInfo struct {
-	Username    string `json:"username"`
-	Role        string `json:"role"`
-	CreatedAt   string `json:"created_at"`
-	LastLoginAt string `json:"last_login_at,omitempty"`
+	Username      string `json:"username"`
+	Role          string `json:"role"`
+	CreatedAt     string `json:"created_at"`
+	LastLoginAt   string `json:"last_login_at,omitempty"`
+	Email         string `json:"email,omitempty"`
+	EmailVerified bool   `json:"email_verified"`
+	Disabled      bool   `json:"disabled"`
 }
 
 type userSettings struct {
@@ -80,6 +89,16 @@ type userSettings struct {
 	CloudTunnelEnabled bool
 	Commands           map[string]policy.CommandPolicy
 	AllowPaths         []string
+	ArchivedFolders    []string
+	ArchivedSessions   []string
+	ForgottenFolders   []string
+	ForgottenSessions  []string
+	QuickCommands      []userQuickCommand
+}
+
+type userQuickCommand struct {
+	Label   string `json:"label"`
+	Command string `json:"command"`
 }
 
 type userSettingsPayload struct {
@@ -89,6 +108,11 @@ type userSettingsPayload struct {
 	GatewayURL         string                         `json:"gateway_url"`
 	Commands           map[string]adminCommandPayload `json:"commands"`
 	AllowPaths         []string                       `json:"allow_paths"`
+	ArchivedFolders    []string                       `json:"archived_folders,omitempty"`
+	ArchivedSessions   []string                       `json:"archived_sessions,omitempty"`
+	ForgottenFolders   []string                       `json:"forgotten_folders,omitempty"`
+	ForgottenSessions  []string                       `json:"forgotten_sessions,omitempty"`
+	QuickCommands      []userQuickCommand             `json:"quick_commands,omitempty"`
 	PolicyLimits       userPolicyLimitsPayload        `json:"policy_limits"`
 }
 
@@ -102,6 +126,21 @@ type userSettingsUpdatePayload struct {
 	CloudTunnelEnabled bool                           `json:"cloud_tunnel_enabled"`
 	Commands           map[string]adminCommandPayload `json:"commands"`
 	AllowPaths         []string                       `json:"allow_paths"`
+	ArchivedFolders    []string                       `json:"archived_folders,omitempty"`
+	ArchivedSessions   []string                       `json:"archived_sessions,omitempty"`
+	ForgottenFolders   []string                       `json:"forgotten_folders,omitempty"`
+	ForgottenSessions  []string                       `json:"forgotten_sessions,omitempty"`
+}
+
+type userArchiveUpdatePayload struct {
+	ArchivedFolders   []string `json:"archived_folders"`
+	ArchivedSessions  []string `json:"archived_sessions"`
+	ForgottenFolders  []string `json:"forgotten_folders"`
+	ForgottenSessions []string `json:"forgotten_sessions"`
+}
+
+type userQuickCommandsUpdatePayload struct {
+	QuickCommands []userQuickCommand `json:"quick_commands"`
 }
 
 type accountProfileUpdatePayload struct {
@@ -182,13 +221,51 @@ func (s *accountStore) initSchema() error {
 			role TEXT NOT NULL,
 			password_hash TEXT NOT NULL,
 			created_at TEXT NOT NULL,
-			last_login_at TEXT
+			last_login_at TEXT,
+			email TEXT,
+			email_verified INTEGER NOT NULL DEFAULT 0,
+			email_verified_at TEXT
 		)`,
 		`CREATE TABLE IF NOT EXISTS sessions (
 			session_id TEXT PRIMARY KEY,
 			username TEXT NOT NULL,
 			created_at TEXT NOT NULL,
 			expires_at TEXT NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS email_tokens (
+			token_hash TEXT PRIMARY KEY,
+			username TEXT NOT NULL,
+			kind TEXT NOT NULL,
+			email TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			expires_at TEXT NOT NULL,
+			used_at TEXT
+		)`,
+		`CREATE TABLE IF NOT EXISTS pending_registrations (
+			token_hash TEXT PRIMARY KEY,
+			username TEXT NOT NULL,
+			email TEXT NOT NULL,
+			password_hash TEXT NOT NULL,
+			role TEXT NOT NULL DEFAULT 'user',
+			created_at TEXT NOT NULL,
+			expires_at TEXT NOT NULL,
+			used_at TEXT
+		)`,
+		`CREATE TABLE IF NOT EXISTS email_verification_codes (
+			email TEXT PRIMARY KEY,
+			code_hash TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			expires_at TEXT NOT NULL,
+			attempts INTEGER NOT NULL DEFAULT 0,
+			last_sent_at TEXT NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS oauth_identities (
+			provider TEXT NOT NULL,
+			subject TEXT NOT NULL,
+			username TEXT NOT NULL,
+			email TEXT,
+			linked_at TEXT NOT NULL,
+			PRIMARY KEY (provider, subject)
 		)`,
 		`CREATE TABLE IF NOT EXISTS user_settings (
 			username TEXT PRIMARY KEY,
@@ -211,11 +288,83 @@ func (s *accountStore) initSchema() error {
 			path TEXT NOT NULL,
 			PRIMARY KEY (username, path)
 		)`,
+		`CREATE TABLE IF NOT EXISTS user_archived_folders (
+			username TEXT NOT NULL,
+			path TEXT NOT NULL,
+			PRIMARY KEY (username, path)
+		)`,
+		`CREATE TABLE IF NOT EXISTS user_archived_sessions (
+			username TEXT NOT NULL,
+			session_id TEXT NOT NULL,
+			PRIMARY KEY (username, session_id)
+		)`,
+		`CREATE TABLE IF NOT EXISTS user_forgotten_folders (
+			username TEXT NOT NULL,
+			path TEXT NOT NULL,
+			PRIMARY KEY (username, path)
+		)`,
+		`CREATE TABLE IF NOT EXISTS user_forgotten_sessions (
+			username TEXT NOT NULL,
+			session_id TEXT NOT NULL,
+			PRIMARY KEY (username, session_id)
+		)`,
+		`CREATE TABLE IF NOT EXISTS user_quick_commands (
+			username TEXT NOT NULL,
+			position INTEGER NOT NULL,
+			label TEXT NOT NULL DEFAULT '',
+			command TEXT NOT NULL,
+			PRIMARY KEY (username, position)
+		)`,
 	}
 	for _, statement := range statements {
 		if _, err := s.db.Exec(statement); err != nil {
 			return err
 		}
+	}
+	return s.migrateAccountsSchema()
+}
+
+// migrateAccountsSchema brings older DB files up to date by adding columns
+// and indexes that weren't part of the original CREATE TABLE. Each step is
+// idempotent and tolerant of "duplicate column" errors so it can run on
+// every startup.
+func (s *accountStore) migrateAccountsSchema() error {
+	addColumn := func(table, column, definition string) error {
+		_, err := s.db.Exec(fmt.Sprintf(`ALTER TABLE %s ADD COLUMN %s %s`, table, column, definition))
+		if err == nil {
+			return nil
+		}
+		if strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+			return nil
+		}
+		return err
+	}
+	if err := addColumn("accounts", "email", "TEXT"); err != nil {
+		return err
+	}
+	if err := addColumn("accounts", "email_verified", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := addColumn("accounts", "email_verified_at", "TEXT"); err != nil {
+		return err
+	}
+	if err := addColumn("accounts", "disabled", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS accounts_email_uidx ON accounts(email) WHERE email IS NOT NULL AND email != ''`); err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS email_tokens_user_kind_idx ON email_tokens(username, kind)`); err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS pending_registrations_email_idx ON pending_registrations(email)`); err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS pending_registrations_username_idx ON pending_registrations(username)`); err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS oauth_identities_user_idx ON oauth_identities(username)`); err != nil {
+		return err
 	}
 	return nil
 }
@@ -283,6 +432,25 @@ func (s *accountStore) loadLegacyJSON() error {
 			}
 		}
 	}
+	if state.UserSettings != nil {
+		s.userSettings = make(map[string]userSettings, len(state.UserSettings))
+		for username, settings := range state.UserSettings {
+			username = normalizeTunnelAccount(firstNonEmpty(settings.Username, username))
+			if username == "" {
+				continue
+			}
+			settings.Username = username
+			if settings.Commands == nil {
+				settings.Commands = make(map[string]policy.CommandPolicy)
+			}
+			settings.AllowPaths = cleanPaths(settings.AllowPaths)
+			settings.ArchivedFolders = cleanPaths(settings.ArchivedFolders)
+			settings.ForgottenFolders = cleanPaths(settings.ForgottenFolders)
+			settings.ArchivedSessions = cleanList(settings.ArchivedSessions)
+			settings.ForgottenSessions = cleanList(settings.ForgottenSessions)
+			s.userSettings[username] = settings
+		}
+	}
 	return nil
 }
 
@@ -343,10 +511,11 @@ func (s *accountStore) saveLocked(defaults policy.Config) error {
 		return nil
 	}
 	state := accountStoreFile{
-		Version:  1,
-		Updated:  time.Now(),
-		Accounts: s.accounts,
-		Sessions: s.sessions,
+		Version:      1,
+		Updated:      time.Now(),
+		Accounts:     s.accounts,
+		Sessions:     s.sessions,
+		UserSettings: s.userSettings,
 	}
 	content, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
@@ -360,6 +529,28 @@ func (s *accountStore) saveLocked(defaults policy.Config) error {
 		return err
 	}
 	return os.Rename(tmp, s.path)
+}
+
+func (s *accountStore) SetPasswordPolicyResolver(fn func() passwordPolicy) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.policyResolver = fn
+	s.mu.Unlock()
+}
+
+func (s *accountStore) passwordPolicy() passwordPolicy {
+	if s == nil {
+		return defaultPasswordPolicy()
+	}
+	s.mu.RLock()
+	fn := s.policyResolver
+	s.mu.RUnlock()
+	if fn == nil {
+		return defaultPasswordPolicy()
+	}
+	return fn()
 }
 
 func (s *accountStore) Register(username string, password string, defaults policy.Config) (accountSession, error) {
@@ -379,8 +570,8 @@ func (s *accountStore) createAccount(username string, password string, role stri
 	if err != nil {
 		return accountSession{}, err
 	}
-	if len(password) < accountPasswordMinLength {
-		return accountSession{}, fmt.Errorf("password must be at least %d characters", accountPasswordMinLength)
+	if err := validatePassword(password, s.passwordPolicy()); err != nil {
+		return accountSession{}, err
 	}
 	hash, err := hashPassword(password)
 	if err != nil {
@@ -439,6 +630,9 @@ func (s *accountStore) Login(username string, password string) (accountSession, 
 	record, ok := s.accounts[username]
 	if !ok || !verifyPassword(password, record.PasswordHash) {
 		return accountSession{}, errors.New("invalid username or password")
+	}
+	if record.Disabled {
+		return accountSession{}, errors.New("account is disabled")
 	}
 	session, err := newAccountSession(username, now)
 	if err != nil {
@@ -506,7 +700,7 @@ func (s *accountStore) ValidateSessionInfo(sessionID string) (accountPublicInfo,
 	defer s.mu.Unlock()
 	session, ok := s.sessions[sessionID]
 	record := s.accounts[session.Username]
-	if !ok || session.ExpiresAt.Before(now) || record.Username == "" {
+	if !ok || session.ExpiresAt.Before(now) || record.Username == "" || record.Disabled {
 		if ok {
 			delete(s.sessions, sessionID)
 			_ = s.saveLocked(policy.Config{})
@@ -514,10 +708,13 @@ func (s *accountStore) ValidateSessionInfo(sessionID string) (accountPublicInfo,
 		return accountPublicInfo{}, false
 	}
 	return accountPublicInfo{
-		Username:    record.Username,
-		Role:        normalizeAccountRole(record.Role),
-		CreatedAt:   formatAccountTime(record.CreatedAt),
-		LastLoginAt: formatAccountTime(record.LastLoginAt),
+		Username:      record.Username,
+		Role:          normalizeAccountRole(record.Role),
+		CreatedAt:     formatAccountTime(record.CreatedAt),
+		LastLoginAt:   formatAccountTime(record.LastLoginAt),
+		Email:         record.Email,
+		EmailVerified: record.EmailVerified,
+		Disabled:      record.Disabled,
 	}, true
 }
 
@@ -575,8 +772,8 @@ func (s *accountStore) UpdatePassword(username string, currentPassword string, n
 	if strings.TrimSpace(currentPassword) == "" {
 		return errors.New("current password is required")
 	}
-	if len(newPassword) < accountPasswordMinLength {
-		return fmt.Errorf("new password must be at least %d characters", accountPasswordMinLength)
+	if err := validatePassword(newPassword, s.passwordPolicy()); err != nil {
+		return err
 	}
 	nextHash, err := hashPassword(newPassword)
 	if err != nil {
@@ -594,6 +791,69 @@ func (s *accountStore) UpdatePassword(username string, currentPassword string, n
 	return s.saveLocked(policy.Config{})
 }
 
+func (s *accountStore) SetAccountDisabled(username string, disabled bool) error {
+	if s == nil {
+		return errors.New("account store is not configured")
+	}
+	username, err := normalizeAccountUsername(username)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record, ok := s.accounts[username]
+	if !ok {
+		return errors.New("account not found")
+	}
+	if s.adminAccount != "" && username == s.adminAccount && disabled {
+		return errors.New("cannot disable the bootstrap admin account")
+	}
+	if record.Disabled == disabled {
+		return nil
+	}
+	record.Disabled = disabled
+	s.accounts[username] = record
+	if disabled {
+		for sessionID, session := range s.sessions {
+			if session.Username == username {
+				delete(s.sessions, sessionID)
+			}
+		}
+	}
+	return s.saveLocked(policy.Config{})
+}
+
+func (s *accountStore) AdminResetPassword(username string, newPassword string) error {
+	if s == nil {
+		return errors.New("account store is not configured")
+	}
+	username, err := normalizeAccountUsername(username)
+	if err != nil {
+		return err
+	}
+	if err := validatePassword(newPassword, s.passwordPolicy()); err != nil {
+		return err
+	}
+	nextHash, err := hashPassword(newPassword)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record, ok := s.accounts[username]
+	if !ok {
+		return errors.New("account not found")
+	}
+	record.PasswordHash = nextHash
+	s.accounts[username] = record
+	for sessionID, session := range s.sessions {
+		if session.Username == username {
+			delete(s.sessions, sessionID)
+		}
+	}
+	return s.saveLocked(policy.Config{})
+}
+
 func (s *accountStore) List() []accountPublicInfo {
 	if s == nil {
 		return nil
@@ -603,10 +863,13 @@ func (s *accountStore) List() []accountPublicInfo {
 	items := make([]accountPublicInfo, 0, len(s.accounts))
 	for _, account := range s.accounts {
 		items = append(items, accountPublicInfo{
-			Username:    account.Username,
-			Role:        normalizeAccountRole(account.Role),
-			CreatedAt:   formatAccountTime(account.CreatedAt),
-			LastLoginAt: formatAccountTime(account.LastLoginAt),
+			Username:      account.Username,
+			Role:          normalizeAccountRole(account.Role),
+			CreatedAt:     formatAccountTime(account.CreatedAt),
+			LastLoginAt:   formatAccountTime(account.LastLoginAt),
+			Email:         account.Email,
+			EmailVerified: account.EmailVerified,
+			Disabled:      account.Disabled,
 		})
 	}
 	sort.Slice(items, func(i, j int) bool {
@@ -664,6 +927,8 @@ func (s *accountStore) UserSettings(username string, defaults policy.Config) (us
 		settings.Commands = make(map[string]policy.CommandPolicy)
 		s.userSettings[username] = settings
 	}
+	settings = normalizeUserSettings(settings)
+	s.userSettings[username] = settings
 	return cloneUserSettings(settings), nil
 }
 
@@ -684,11 +949,82 @@ func (s *accountStore) SaveUserSettings(username string, update userSettingsUpda
 	if _, ok := s.accounts[username]; !ok {
 		return userSettings{}, errors.New("account does not exist")
 	}
+	existing := normalizeUserSettings(s.userSettings[username])
+	if update.ArchivedFolders == nil {
+		next.ArchivedFolders = slices.Clone(existing.ArchivedFolders)
+	}
+	if update.ArchivedSessions == nil {
+		next.ArchivedSessions = slices.Clone(existing.ArchivedSessions)
+	}
+	if update.ForgottenFolders == nil {
+		next.ForgottenFolders = slices.Clone(existing.ForgottenFolders)
+	}
+	if update.ForgottenSessions == nil {
+		next.ForgottenSessions = slices.Clone(existing.ForgottenSessions)
+	}
+	// QuickCommands are managed via a dedicated endpoint and must survive
+	// general settings updates that don't carry them.
+	next.QuickCommands = slices.Clone(existing.QuickCommands)
 	s.userSettings[username] = next
 	if err := s.saveLocked(global); err != nil {
 		return userSettings{}, err
 	}
 	return cloneUserSettings(next), nil
+}
+
+func (s *accountStore) UpdateUserArchive(username string, update userArchiveUpdatePayload, global policy.Config) (userSettings, error) {
+	if len(global.Commands) == 0 {
+		global = fallbackAccountPolicy()
+	}
+	username, err := normalizeAccountUsername(username)
+	if err != nil {
+		return userSettings{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.accounts[username]; !ok {
+		return userSettings{}, errors.New("account does not exist")
+	}
+	settings := normalizeUserSettings(s.userSettings[username])
+	if settings.Username == "" {
+		settings = defaultUserSettings(username, global)
+	}
+	settings.ArchivedFolders = cleanPaths(update.ArchivedFolders)
+	settings.ArchivedSessions = cleanList(update.ArchivedSessions)
+	settings.ForgottenFolders = cleanPaths(update.ForgottenFolders)
+	settings.ForgottenSessions = cleanList(update.ForgottenSessions)
+	settings.ArchivedFolders = subtractStrings(settings.ArchivedFolders, settings.ForgottenFolders)
+	settings.ArchivedSessions = subtractStrings(settings.ArchivedSessions, settings.ForgottenSessions)
+	s.userSettings[username] = settings
+	if err := s.saveLocked(global); err != nil {
+		return userSettings{}, err
+	}
+	return cloneUserSettings(settings), nil
+}
+
+func (s *accountStore) UpdateUserQuickCommands(username string, update userQuickCommandsUpdatePayload, global policy.Config) (userSettings, error) {
+	if len(global.Commands) == 0 {
+		global = fallbackAccountPolicy()
+	}
+	username, err := normalizeAccountUsername(username)
+	if err != nil {
+		return userSettings{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.accounts[username]; !ok {
+		return userSettings{}, errors.New("account does not exist")
+	}
+	settings := normalizeUserSettings(s.userSettings[username])
+	if settings.Username == "" {
+		settings = defaultUserSettings(username, global)
+	}
+	settings.QuickCommands = normalizeQuickCommands(update.QuickCommands)
+	s.userSettings[username] = settings
+	if err := s.saveLocked(global); err != nil {
+		return userSettings{}, err
+	}
+	return cloneUserSettings(settings), nil
 }
 
 func (s *accountStore) UserPolicy(username string, global policy.Config) (policy.Config, error) {
@@ -732,26 +1068,33 @@ func (s *accountStore) isAdmin(username string) bool {
 }
 
 func (s *accountStore) loadAccounts() (map[string]accountRecord, error) {
-	rows, err := s.db.Query(`SELECT username, role, password_hash, created_at, COALESCE(last_login_at, '') FROM accounts`)
+	rows, err := s.db.Query(`SELECT username, role, password_hash, created_at, COALESCE(last_login_at, ''), COALESCE(email, ''), COALESCE(email_verified, 0), COALESCE(email_verified_at, ''), COALESCE(disabled, 0) FROM accounts`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	accounts := make(map[string]accountRecord)
 	for rows.Next() {
-		var username, role, passwordHash, createdAt, lastLoginAt string
-		if err := rows.Scan(&username, &role, &passwordHash, &createdAt, &lastLoginAt); err != nil {
+		var username, role, passwordHash, createdAt, lastLoginAt, email, emailVerifiedAt string
+		var emailVerified int
+		var disabled int
+		if err := rows.Scan(&username, &role, &passwordHash, &createdAt, &lastLoginAt, &email, &emailVerified, &emailVerifiedAt, &disabled); err != nil {
 			return nil, err
 		}
 		record := accountRecord{
-			Username:     username,
-			Role:         normalizeAccountRole(role),
-			PasswordHash: passwordHash,
-			CreatedAt:    parseAccountTime(createdAt),
-			LastLoginAt:  parseAccountTime(lastLoginAt),
+			Username:        username,
+			Role:            normalizeAccountRole(role),
+			PasswordHash:    passwordHash,
+			CreatedAt:       parseAccountTime(createdAt),
+			LastLoginAt:     parseAccountTime(lastLoginAt),
+			Email:           strings.ToLower(strings.TrimSpace(email)),
+			EmailVerified:   emailVerified != 0,
+			EmailVerifiedAt: parseAccountTime(emailVerifiedAt),
+			Disabled:        disabled != 0,
 		}
 		if s.adminAccount != "" && username == s.adminAccount {
 			record.Role = accountRoleAdmin
+			record.Disabled = false
 		}
 		accounts[username] = record
 	}
@@ -856,7 +1199,84 @@ func (s *accountStore) loadAllUserSettings() (map[string]userSettings, error) {
 		setting.AllowPaths = append(setting.AllowPaths, path)
 		settings[username] = setting
 	}
-	return settings, pathRows.Err()
+	if err := pathRows.Err(); err != nil {
+		return nil, err
+	}
+	if err := loadUserSettingStrings(s.db, settings, "user_archived_folders", "path", func(setting *userSettings, values []string) {
+		setting.ArchivedFolders = values
+	}); err != nil {
+		return nil, err
+	}
+	if err := loadUserSettingStrings(s.db, settings, "user_archived_sessions", "session_id", func(setting *userSettings, values []string) {
+		setting.ArchivedSessions = values
+	}); err != nil {
+		return nil, err
+	}
+	if err := loadUserSettingStrings(s.db, settings, "user_forgotten_folders", "path", func(setting *userSettings, values []string) {
+		setting.ForgottenFolders = values
+	}); err != nil {
+		return nil, err
+	}
+	if err := loadUserSettingStrings(s.db, settings, "user_forgotten_sessions", "session_id", func(setting *userSettings, values []string) {
+		setting.ForgottenSessions = values
+	}); err != nil {
+		return nil, err
+	}
+	if err := loadUserQuickCommands(s.db, settings); err != nil {
+		return nil, err
+	}
+	return settings, nil
+}
+
+func loadUserQuickCommands(db *sql.DB, settings map[string]userSettings) error {
+	rows, err := db.Query(`SELECT username, label, command FROM user_quick_commands ORDER BY username, position`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var username, label, command string
+		if err := rows.Scan(&username, &label, &command); err != nil {
+			return err
+		}
+		setting := settings[username]
+		if setting.Username == "" {
+			setting.Username = username
+			setting.Commands = make(map[string]policy.CommandPolicy)
+		}
+		setting.QuickCommands = append(setting.QuickCommands, userQuickCommand{Label: label, Command: command})
+		settings[username] = setting
+	}
+	return rows.Err()
+}
+
+func loadUserSettingStrings(db *sql.DB, settings map[string]userSettings, table string, column string, assign func(*userSettings, []string)) error {
+	rows, err := db.Query(fmt.Sprintf(`SELECT username, %s FROM %s ORDER BY %s`, column, table, column))
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	grouped := make(map[string][]string)
+	for rows.Next() {
+		var username, value string
+		if err := rows.Scan(&username, &value); err != nil {
+			return err
+		}
+		grouped[username] = append(grouped[username], value)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for username, values := range grouped {
+		setting := settings[username]
+		if setting.Username == "" {
+			setting.Username = username
+			setting.Commands = make(map[string]policy.CommandPolicy)
+		}
+		assign(&setting, values)
+		settings[username] = setting
+	}
+	return nil
 }
 
 func (s *accountStore) saveSQLiteLocked(defaults policy.Config) error {
@@ -872,13 +1292,21 @@ func (s *accountStore) saveSQLiteLocked(defaults policy.Config) error {
 		return err
 	}
 	for _, record := range s.accounts {
+		var emailValue any
+		if email := strings.ToLower(strings.TrimSpace(record.Email)); email != "" {
+			emailValue = email
+		}
 		if _, err := tx.Exec(
-			`INSERT INTO accounts (username, role, password_hash, created_at, last_login_at) VALUES (?, ?, ?, ?, ?)`,
+			`INSERT INTO accounts (username, role, password_hash, created_at, last_login_at, email, email_verified, email_verified_at, disabled) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			record.Username,
 			normalizeAccountRole(record.Role),
 			record.PasswordHash,
 			formatAccountTime(record.CreatedAt),
 			nullableAccountTime(record.LastLoginAt),
+			emailValue,
+			boolInt(record.EmailVerified),
+			nullableAccountTime(record.EmailVerifiedAt),
+			boolInt(record.Disabled),
 		); err != nil {
 			return err
 		}
@@ -907,6 +1335,21 @@ func (s *accountStore) saveSQLiteLocked(defaults policy.Config) error {
 		return err
 	}
 	if _, err := tx.Exec(`DELETE FROM user_allow_paths`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM user_archived_folders`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM user_archived_sessions`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM user_forgotten_folders`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM user_forgotten_sessions`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM user_quick_commands`); err != nil {
 		return err
 	}
 	now := formatAccountTime(time.Now())
@@ -942,6 +1385,34 @@ func (s *accountStore) saveSQLiteLocked(defaults policy.Config) error {
 		}
 		for _, path := range settings.AllowPaths {
 			if _, err := tx.Exec(`INSERT INTO user_allow_paths (username, path) VALUES (?, ?)`, username, path); err != nil {
+				return err
+			}
+		}
+		for _, path := range settings.ArchivedFolders {
+			if _, err := tx.Exec(`INSERT INTO user_archived_folders (username, path) VALUES (?, ?)`, username, path); err != nil {
+				return err
+			}
+		}
+		for _, id := range settings.ArchivedSessions {
+			if _, err := tx.Exec(`INSERT INTO user_archived_sessions (username, session_id) VALUES (?, ?)`, username, id); err != nil {
+				return err
+			}
+		}
+		for _, path := range settings.ForgottenFolders {
+			if _, err := tx.Exec(`INSERT INTO user_forgotten_folders (username, path) VALUES (?, ?)`, username, path); err != nil {
+				return err
+			}
+		}
+		for _, id := range settings.ForgottenSessions {
+			if _, err := tx.Exec(`INSERT INTO user_forgotten_sessions (username, session_id) VALUES (?, ?)`, username, id); err != nil {
+				return err
+			}
+		}
+		for index, qc := range settings.QuickCommands {
+			if _, err := tx.Exec(
+				`INSERT INTO user_quick_commands (username, position, label, command) VALUES (?, ?, ?, ?)`,
+				username, index, qc.Label, qc.Command,
+			); err != nil {
 				return err
 			}
 		}
@@ -1075,12 +1546,66 @@ func defaultUserSettings(username string, defaults policy.Config) userSettings {
 }
 
 func cloneUserSettings(settings userSettings) userSettings {
+	settings = normalizeUserSettings(settings)
 	return userSettings{
 		Username:           settings.Username,
 		CloudTunnelEnabled: settings.CloudTunnelEnabled,
 		Commands:           clonePolicyCommands(settings.Commands),
 		AllowPaths:         slices.Clone(settings.AllowPaths),
+		ArchivedFolders:    slices.Clone(settings.ArchivedFolders),
+		ArchivedSessions:   slices.Clone(settings.ArchivedSessions),
+		ForgottenFolders:   slices.Clone(settings.ForgottenFolders),
+		ForgottenSessions:  slices.Clone(settings.ForgottenSessions),
+		QuickCommands:      slices.Clone(settings.QuickCommands),
 	}
+}
+
+func normalizeUserSettings(settings userSettings) userSettings {
+	settings.Username = normalizeTunnelAccount(settings.Username)
+	if settings.Commands == nil {
+		settings.Commands = make(map[string]policy.CommandPolicy)
+	}
+	settings.AllowPaths = cleanPaths(settings.AllowPaths)
+	settings.ArchivedFolders = cleanPaths(settings.ArchivedFolders)
+	settings.ForgottenFolders = cleanPaths(settings.ForgottenFolders)
+	settings.ArchivedSessions = cleanList(settings.ArchivedSessions)
+	settings.ForgottenSessions = cleanList(settings.ForgottenSessions)
+	settings.ArchivedFolders = subtractStrings(settings.ArchivedFolders, settings.ForgottenFolders)
+	settings.ArchivedSessions = subtractStrings(settings.ArchivedSessions, settings.ForgottenSessions)
+	settings.QuickCommands = normalizeQuickCommands(settings.QuickCommands)
+	return settings
+}
+
+const userQuickCommandMaxCount = 32
+const userQuickCommandMaxLabel = 32
+const userQuickCommandMaxCommand = 512
+
+func normalizeQuickCommands(items []userQuickCommand) []userQuickCommand {
+	if len(items) == 0 {
+		return nil
+	}
+	out := make([]userQuickCommand, 0, len(items))
+	for _, qc := range items {
+		command := strings.TrimSpace(qc.Command)
+		if command == "" {
+			continue
+		}
+		if len(command) > userQuickCommandMaxCommand {
+			command = command[:userQuickCommandMaxCommand]
+		}
+		label := strings.TrimSpace(qc.Label)
+		if len([]rune(label)) > userQuickCommandMaxLabel {
+			label = string([]rune(label)[:userQuickCommandMaxLabel])
+		}
+		out = append(out, userQuickCommand{Label: label, Command: command})
+		if len(out) >= userQuickCommandMaxCount {
+			break
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func clonePolicyConfig(cfg policy.Config) policy.Config {
@@ -1111,7 +1636,13 @@ func userSettingsFromPayload(username string, payload userSettingsUpdatePayload,
 		CloudTunnelEnabled: payload.CloudTunnelEnabled,
 		Commands:           make(map[string]policy.CommandPolicy),
 		AllowPaths:         cleanPaths(payload.AllowPaths),
+		ArchivedFolders:    cleanPaths(payload.ArchivedFolders),
+		ArchivedSessions:   cleanList(payload.ArchivedSessions),
+		ForgottenFolders:   cleanPaths(payload.ForgottenFolders),
+		ForgottenSessions:  cleanList(payload.ForgottenSessions),
 	}
+	settings.ArchivedFolders = subtractStrings(settings.ArchivedFolders, settings.ForgottenFolders)
+	settings.ArchivedSessions = subtractStrings(settings.ArchivedSessions, settings.ForgottenSessions)
 	// Per-user allow_paths are independent across agents — each client has
 	// its own filesystem, so the cloud admin's global list cannot bound
 	// what each user is allowed to see locally.
@@ -1200,6 +1731,7 @@ func policyFromUserSettings(settings userSettings, global policy.Config) (policy
 }
 
 func userSettingsToPayload(settings userSettings, account accountPublicInfo, global policy.Config, gatewayURL string) userSettingsPayload {
+	settings = normalizeUserSettings(settings)
 	return userSettingsPayload{
 		Account:            account.Username,
 		Role:               account.Role,
@@ -1207,6 +1739,11 @@ func userSettingsToPayload(settings userSettings, account accountPublicInfo, glo
 		GatewayURL:         gatewayURL,
 		Commands:           adminPayloadCommands(settings.Commands),
 		AllowPaths:         slices.Clone(settings.AllowPaths),
+		ArchivedFolders:    slices.Clone(settings.ArchivedFolders),
+		ArchivedSessions:   slices.Clone(settings.ArchivedSessions),
+		ForgottenFolders:   slices.Clone(settings.ForgottenFolders),
+		ForgottenSessions:  slices.Clone(settings.ForgottenSessions),
+		QuickCommands:      slices.Clone(settings.QuickCommands),
 		PolicyLimits: userPolicyLimitsPayload{
 			Commands:   adminPayloadCommands(global.Commands),
 			AllowPaths: nil,
@@ -1241,6 +1778,23 @@ func intersectStrings(values []string, allowed []string) []string {
 	var out []string
 	for _, value := range values {
 		if _, ok := allowedSet[value]; ok {
+			out = append(out, value)
+		}
+	}
+	return out
+}
+
+func subtractStrings(values []string, blocked []string) []string {
+	if len(values) == 0 || len(blocked) == 0 {
+		return slices.Clone(values)
+	}
+	blockedSet := make(map[string]struct{}, len(blocked))
+	for _, value := range blocked {
+		blockedSet[value] = struct{}{}
+	}
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if _, ok := blockedSet[value]; !ok {
 			out = append(out, value)
 		}
 	}

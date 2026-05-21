@@ -3,6 +3,7 @@ const state = {
   currentPath: "",
   entries: []
 };
+const appPath = window.XMuxPath?.path || ((path) => path);
 
 const els = {
   saveState: document.getElementById("saveState"),
@@ -63,7 +64,7 @@ async function loadSettings() {
     await loadFS("");
   } catch (error) {
     if (/unauthorized/i.test(error.message)) {
-      window.location.href = "/user/login.html";
+      window.location.href = appPath("/user/login.html");
       return;
     }
     els.saveState.textContent = error.message || "加载失败";
@@ -250,7 +251,7 @@ async function saveProfile() {
 
 async function logout() {
   await fetchJSON("/cloud-terminal-api/accounts/logout", { method: "POST" }).catch(() => null);
-  window.location.href = "/user/login.html";
+  window.location.href = appPath("/user/login.html");
 }
 
 async function loadFS(path) {
@@ -345,7 +346,7 @@ function switchSection(section) {
 }
 
 async function fetchJSON(path, options = {}) {
-  const response = await fetch(path, Object.assign({ credentials: "same-origin" }, options));
+  const response = await fetch(appPath(path), Object.assign({ credentials: "same-origin" }, options));
   if (!response.ok) {
     const detail = (await response.text()).trim();
     throw new Error(cleanError(detail || `HTTP ${response.status}`));

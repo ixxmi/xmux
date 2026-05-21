@@ -56,6 +56,11 @@ func (s *Server) AgentRoutes(initialCloudBaseURL string) http.Handler {
 		mux.Handle("/admin/", adminFiles)
 	}
 
+	if sharedSubFS, err := fs.Sub(s.staticFS, "shared"); err == nil {
+		sharedFiles := http.StripPrefix("/shared/", http.FileServer(http.FS(sharedSubFS)))
+		mux.Handle("/shared/", sharedFiles)
+	}
+
 	mux.HandleFunc("/", s.agentRoot)
 	return s.securityHeaders(mux)
 }
@@ -345,6 +350,10 @@ func (s *Server) clearBoundAccountPaths(ctx context.Context, account string, ses
 		CloudTunnelEnabled: settings.CloudTunnelEnabled,
 		Commands:           settings.Commands,
 		AllowPaths:         nil,
+		ArchivedFolders:    settings.ArchivedFolders,
+		ArchivedSessions:   settings.ArchivedSessions,
+		ForgottenFolders:   settings.ForgottenFolders,
+		ForgottenSessions:  settings.ForgottenSessions,
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {

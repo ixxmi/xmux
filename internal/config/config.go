@@ -72,11 +72,12 @@ type ServerConfig struct {
 }
 
 type CloudTunnelConfig struct {
-	Enabled      bool   `yaml:"enabled"`
-	DiscoveryURL string `yaml:"discovery_url,omitempty"`
-	GatewayURL   string `yaml:"gateway_url,omitempty"`
-	Account      string `yaml:"account,omitempty"`
-	SessionID    string `yaml:"session_id,omitempty"`
+	Enabled        bool     `yaml:"enabled"`
+	DiscoveryURL   string   `yaml:"discovery_url,omitempty"`
+	GatewayURL     string   `yaml:"gateway_url,omitempty"`
+	Account        string   `yaml:"account,omitempty"`
+	SessionID      string   `yaml:"session_id,omitempty"`
+	ReconnectGrace Duration `yaml:"reconnect_grace,omitempty"`
 }
 
 type EdgeConfig struct {
@@ -123,6 +124,9 @@ func Load(path string) (*Config, error) {
 	}
 	if cfg.Server.AccountRegistrationEnabled == nil {
 		cfg.Server.AccountRegistrationEnabled = boolPtr(true)
+	}
+	if cfg.CloudTunnel.ReconnectGrace.Duration <= 0 {
+		cfg.CloudTunnel.ReconnectGrace.Duration = 30 * time.Second
 	}
 	if cfg.Edge.ID == "" {
 		cfg.Edge.ID = "local-edge"
@@ -188,7 +192,8 @@ func Default() Config {
 			},
 		},
 		CloudTunnel: CloudTunnelConfig{
-			Enabled: false,
+			Enabled:        false,
+			ReconnectGrace: Duration{Duration: 30 * time.Second},
 		},
 		Edge: EdgeConfig{
 			ID:      "local-edge",

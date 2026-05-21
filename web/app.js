@@ -16,6 +16,11 @@
   const logoutButton = document.getElementById("logoutButton");
   const terminalFooter = document.getElementById("terminalFooter");
   const workDirChip = document.getElementById("workDirChip");
+  const appPath = window.XMuxPath?.path || ((path) => path);
+  const websocketURL = window.XMuxPath?.websocketURL || ((path) => {
+    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    return `${protocol}//${window.location.host}${path}`;
+  });
 
   let completions = ["cat", "cd", "codex", "date", "docker", "kubectl", "ls", "pwd", "uname", "whoami"];
 
@@ -88,7 +93,7 @@
 
   async function submitAccount(username, password) {
     const path = authMode === "register" ? "/cloud-terminal-api/accounts/register" : "/cloud-terminal-api/accounts/login";
-    const response = await fetch(path, {
+    const response = await fetch(appPath(path), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ username, password })
@@ -101,7 +106,7 @@
   }
 
   async function fetchEdge() {
-    const response = await fetch("/cloud-terminal-api/edge");
+    const response = await fetch(appPath("/cloud-terminal-api/edge"));
     if (!response.ok) {
       throw new Error("account rejected");
     }
@@ -256,9 +261,7 @@
       socket.close();
     }
 
-    const protocol = window.location.protocol === "https:" ? "wss" : "ws";
-    const url = `${protocol}://${window.location.host}/cloud-terminal-api/ws/terminal`;
-    socket = new WebSocket(url);
+    socket = new WebSocket(websocketURL("/cloud-terminal-api/ws/terminal"));
 
     socket.addEventListener("open", () => {
       setStatus("connected", "Connected");
@@ -535,7 +538,7 @@
       prefix: context.prefix,
       work_dir: workDir
     });
-    const response = await fetch(`/cloud-terminal-api/complete?${params.toString()}`, {
+    const response = await fetch(appPath(`/cloud-terminal-api/complete?${params.toString()}`), {
       credentials: "same-origin"
     });
     if (!response.ok) {
@@ -679,7 +682,7 @@
       return;
     }
     try {
-      const response = await fetch("/cloud-terminal-api/accounts/me", { credentials: "same-origin" });
+      const response = await fetch(appPath("/cloud-terminal-api/accounts/me"), { credentials: "same-origin" });
       if (!response.ok) {
         accountChip.hidden = true;
         return;
@@ -719,7 +722,7 @@
   async function handleLogout() {
     logoutButton.disabled = true;
     try {
-      await fetch("/cloud-terminal-api/accounts/logout", {
+      await fetch(appPath("/cloud-terminal-api/accounts/logout"), {
         method: "POST",
         credentials: "same-origin"
       });

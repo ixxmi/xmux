@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -29,12 +30,17 @@ import (
 )
 
 const (
-	workbenchCookieName = "cloud-terminal-workbench"
-	workbenchReplayMax  = 4 << 20
-	workbenchFileMax    = 512 << 10
-	workbenchDiffMax    = 256 << 10
-	workbenchWarmupMax  = 2400
+	workbenchCookieName          = "cloud-terminal-workbench"
+	workbenchReplayMax           = 4 << 20
+	workbenchHistoricalReplayMax = 128 << 10
+	workbenchFileMax             = 512 << 10
+	workbenchDiffMax             = 256 << 10
+	workbenchWarmupMax           = 2400
 )
+
+var errWorkbenchSessionNotRunning = errors.New("session is no longer running; start a new terminal from this folder")
+
+const workbenchRestartUnavailableError = "session unavailable after service restart"
 
 type workbenchManager struct {
 	runtime        Runtime
@@ -75,6 +81,10 @@ type workbenchStartResolver interface {
 	ResolveWorkbenchStart(workbenchStartOptions) (workbenchStartResolution, error)
 }
 
+type workbenchSessionResumer interface {
+	ResumeInteractive(context.Context, edge.ExecRequest, edge.InteractiveOptions) (InteractiveSession, error)
+}
+
 type workbenchSession struct {
 	id        string
 	requestID string
@@ -88,6 +98,9 @@ type workbenchSession struct {
 	interactive InteractiveSession
 
 	mu             sync.Mutex
+	submitted      bool
+	title          string
+	inputBuffer    string
 	lastActive     time.Time
 	running        bool
 	exitCode       int
@@ -111,6 +124,8 @@ type workbenchSnapshot struct {
 	WorkDir    string
 	StartedAt  time.Time
 	LastActive time.Time
+	Submitted  bool
+	Title      string
 	Running    bool
 	ExitCode   int
 	Duration   string
@@ -139,7 +154,9 @@ type workbenchServerMessage struct {
 	WorkDir    string `json:"work_dir,omitempty"`
 	StartedAt  string `json:"started_at,omitempty"`
 	LastActive string `json:"last_active,omitempty"`
-	Running    bool   `json:"running,omitempty"`
+	Running    bool   `json:"running"`
+	Submitted  bool   `json:"submitted,omitempty"`
+	Title      string `json:"title,omitempty"`
 }
 
 type workbenchAuthPayload struct {
@@ -150,6 +167,8 @@ type workbenchAuthPayload struct {
 type accountAuthPayload struct {
 	Username string `json:"username"`
 	Password string `json:"password"`
+	Email    string `json:"email,omitempty"`
+	Code     string `json:"code,omitempty"`
 }
 
 type accountCreatePayload struct {
@@ -164,16 +183,23 @@ type accountIdentity struct {
 }
 
 type workbenchStatePayload struct {
-	EdgeID       string                 `json:"edge_id"`
-	EdgeName     string                 `json:"edge_name"`
-	EdgeOnline   bool                   `json:"edge_online"`
-	Tunnel       bool                   `json:"tunnel"`
-	WorkDir      string                 `json:"work_dir"`
-	AllowPaths   []string               `json:"allow_paths"`
-	EdgePaths    []string               `json:"edge_allow_paths,omitempty"`
-	PreviewPorts []int                  `json:"preview_ports"`
-	Agents       []workbenchAgentInfo   `json:"agents"`
-	Sessions     []workbenchSessionInfo `json:"sessions"`
+	EdgeID               string                 `json:"edge_id"`
+	EdgeName             string                 `json:"edge_name"`
+	EdgeOnline           bool                   `json:"edge_online"`
+	EdgeStatus           string                 `json:"edge_status,omitempty"`
+	LastSeen             string                 `json:"last_seen,omitempty"`
+	Tunnel               bool                   `json:"tunnel"`
+	WorkDir              string                 `json:"work_dir"`
+	AllowPaths           []string               `json:"allow_paths"`
+	EdgePaths            []string               `json:"edge_allow_paths,omitempty"`
+	PreviewPorts         []int                  `json:"preview_ports"`
+	Agents               []workbenchAgentInfo   `json:"agents"`
+	Sessions             []workbenchSessionInfo `json:"sessions"`
+	ArchivedFolders      []string               `json:"archived_folders,omitempty"`
+	ArchivedSessions     []string               `json:"archived_sessions,omitempty"`
+	ForgottenFolders     []string               `json:"forgotten_folders,omitempty"`
+	ForgottenSessions    []string               `json:"forgotten_sessions,omitempty"`
+	ArchivedSessionItems []workbenchSessionInfo `json:"archived_session_items,omitempty"`
 }
 
 type workbenchSessionInfo struct {
@@ -184,6 +210,8 @@ type workbenchSessionInfo struct {
 	WorkDir    string `json:"work_dir"`
 	StartedAt  string `json:"started_at"`
 	LastActive string `json:"last_active"`
+	Submitted  bool   `json:"submitted"`
+	Title      string `json:"title,omitempty"`
 	Running    bool   `json:"running"`
 	ExitCode   int    `json:"exit_code"`
 	Duration   string `json:"duration,omitempty"`
@@ -208,6 +236,8 @@ type workbenchPersistedSession struct {
 	WorkDir    string    `json:"work_dir"`
 	StartedAt  time.Time `json:"started_at"`
 	LastActive time.Time `json:"last_active"`
+	Submitted  bool      `json:"submitted,omitempty"`
+	Title      string    `json:"title,omitempty"`
 	Running    bool      `json:"running"`
 	ExitCode   int       `json:"exit_code"`
 	Duration   string    `json:"duration,omitempty"`
@@ -306,8 +336,14 @@ func (m *workbenchManager) getOrCreate(opts workbenchStartOptions) (*workbenchSe
 			if normalizeTunnelAccount(session.account) != normalizeTunnelAccount(opts.Account) {
 				return nil, false, errors.New("session does not belong to this account")
 			}
-			_ = session.Resize(opts.Rows, opts.Cols)
-			session.touch()
+			if session.isLive() {
+				_ = session.Resize(opts.Rows, opts.Cols)
+				session.touch()
+				return session, false, nil
+			}
+			if m.resumeExistingSession(session, opts) {
+				return session, false, nil
+			}
 			return session, false, nil
 		}
 	}
@@ -361,21 +397,85 @@ func (m *workbenchManager) getOrCreate(opts workbenchStartOptions) (*workbenchSe
 	if existing := m.sessions[sessionID]; existing != nil {
 		m.mu.Unlock()
 		session.Close()
-		_ = existing.Resize(opts.Rows, opts.Cols)
-		existing.touch()
+		if existing.isLive() {
+			_ = existing.Resize(opts.Rows, opts.Cols)
+			existing.touch()
+		}
 		return existing, false, nil
 	}
 	m.sessions[sessionID] = session
 	m.mu.Unlock()
-	m.persistState()
 
 	go func() {
 		result := <-interactive.Done()
 		session.finish(result)
-		m.persistState()
+		if session.isSubmitted() {
+			m.persistState()
+		}
 	}()
 
 	return session, true, nil
+}
+
+func (m *workbenchManager) resumeExistingSession(session *workbenchSession, opts workbenchStartOptions) bool {
+	resumer, ok := m.runtime.(workbenchSessionResumer)
+	if !ok {
+		return false
+	}
+	snap := session.snapshot()
+	if snap.Running {
+		return false
+	}
+	workDir := firstNonEmpty(snap.WorkDir, opts.WorkDir)
+	agent := firstNonEmpty(snap.Agent, normalizeWorkbenchAgentID(opts.Agent), "codex")
+	requestID := firstNonEmpty(snap.RequestID, "wb-"+randomWorkbenchID())
+	interactive, err := resumer.ResumeInteractive(context.Background(), edge.ExecRequest{
+		RequestID: requestID,
+		SessionID: snap.ID,
+		User:      firstNonEmpty(normalizeTunnelAccount(opts.Account), normalizeTunnelAccount(snap.Account), "mobile"),
+		EdgeID:    snap.EdgeID,
+		WorkDir:   workDir,
+		Command:   agent,
+		Rows:      opts.Rows,
+		Cols:      opts.Cols,
+	}, edge.InteractiveOptions{
+		Output: func(chunk []byte) {
+			session.appendOutput(chunk)
+			m.persistStateThrottled(2 * time.Second)
+		},
+	})
+	if err != nil {
+		return false
+	}
+
+	session.mu.Lock()
+	if session.running && session.interactive != nil {
+		session.mu.Unlock()
+		interactive.Close()
+		return true
+	}
+	session.requestID = requestID
+	session.edgeID = firstNonEmpty(snap.EdgeID, m.edgeID)
+	session.edgeName = firstNonEmpty(snap.EdgeName, m.edgeName, snap.EdgeID)
+	session.agent = agent
+	session.workDir = workDir
+	session.lastActive = time.Now()
+	session.running = true
+	session.exitCode = 0
+	session.duration = ""
+	session.errText = ""
+	session.closedByClient = false
+	session.interactive = interactive
+	session.mu.Unlock()
+
+	go func() {
+		result := <-interactive.Done()
+		session.finish(result)
+		if session.isSubmitted() {
+			m.persistState()
+		}
+	}()
+	return true
 }
 
 func (m *workbenchManager) resolveStart(opts workbenchStartOptions) (workbenchStartResolution, error) {
@@ -559,6 +659,9 @@ func (m *workbenchManager) list(account string, allowPaths []string, requirePath
 		if account != "" && normalizeTunnelAccount(snap.Account) != account {
 			continue
 		}
+		if !snap.Submitted {
+			continue
+		}
 		if !workbenchSessionAllowedByPolicy(snap.WorkDir, allowPaths, requirePathMatch) {
 			continue
 		}
@@ -570,6 +673,8 @@ func (m *workbenchManager) list(account string, allowPaths []string, requirePath
 			WorkDir:    snap.WorkDir,
 			StartedAt:  formatTime(snap.StartedAt),
 			LastActive: formatTime(snap.LastActive),
+			Submitted:  snap.Submitted,
+			Title:      snap.Title,
 			Running:    snap.Running,
 			ExitCode:   snap.ExitCode,
 			Duration:   snap.Duration,
@@ -596,7 +701,31 @@ func (m *workbenchManager) dispatchTunnelMessage(msg workbenchServerMessage) {
 	switch msg.Type {
 	case "output":
 		session.appendOutput([]byte(msg.Data))
-		m.persistStateThrottled(2 * time.Second)
+		if session.isSubmitted() {
+			m.persistStateThrottled(2 * time.Second)
+		}
+	case "submitted":
+		title := msg.Title
+		if title == "" {
+			title = msg.Data
+		}
+		if session.markSubmitted(title) {
+			snap := session.snapshot()
+			msg.EdgeID = snap.EdgeID
+			msg.EdgeName = snap.EdgeName
+			msg.Agent = snap.Agent
+			msg.AgentLabel = workbenchAgentLabel(snap.Agent)
+			msg.WorkDir = snap.WorkDir
+			msg.StartedAt = formatTime(snap.StartedAt)
+			msg.LastActive = formatTime(snap.LastActive)
+			msg.Running = snap.Running
+			msg.Submitted = snap.Submitted
+			msg.Title = snap.Title
+			for _, callback := range session.callbacks() {
+				callback(msg)
+			}
+			m.persistState()
+		}
 	case "exit":
 		session.finish(edge.ExecResult{
 			ExitCode: msg.ExitCode,
@@ -604,8 +733,42 @@ func (m *workbenchManager) dispatchTunnelMessage(msg workbenchServerMessage) {
 			Error:    msg.Error,
 			WorkDir:  msg.WorkDir,
 		})
-		m.persistState()
+		if session.isSubmitted() {
+			m.persistState()
+		}
 	}
+}
+
+func (m *workbenchManager) publishSession(snap workbenchSnapshot) {
+	if !snap.Submitted {
+		return
+	}
+	for _, callback := range m.sessionCallbacks(snap.ID) {
+		callback(workbenchServerMessage{
+			Type:       "submitted",
+			SessionID:  snap.ID,
+			EdgeID:     snap.EdgeID,
+			EdgeName:   snap.EdgeName,
+			Agent:      snap.Agent,
+			AgentLabel: workbenchAgentLabel(snap.Agent),
+			WorkDir:    snap.WorkDir,
+			StartedAt:  formatTime(snap.StartedAt),
+			LastActive: formatTime(snap.LastActive),
+			Running:    snap.Running,
+			Submitted:  snap.Submitted,
+			Title:      snap.Title,
+		})
+	}
+}
+
+func (m *workbenchManager) sessionCallbacks(sessionID string) []func(workbenchServerMessage) {
+	m.mu.RLock()
+	session := m.sessions[sessionID]
+	m.mu.RUnlock()
+	if session == nil {
+		return nil
+	}
+	return session.callbacks()
 }
 
 func (m *workbenchManager) loadState() error {
@@ -641,6 +804,10 @@ func (m *workbenchManager) loadState() error {
 		if lastActive.IsZero() {
 			lastActive = startedAt
 		}
+		errText := strings.TrimSpace(item.Error)
+		if errText == workbenchRestartUnavailableError {
+			errText = ""
+		}
 		session := &workbenchSession{
 			id:          item.ID,
 			requestID:   item.RequestID,
@@ -651,15 +818,14 @@ func (m *workbenchManager) loadState() error {
 			workDir:     item.WorkDir,
 			startedAt:   startedAt,
 			lastActive:  lastActive,
+			submitted:   item.Submitted || !item.StartedAt.IsZero() || item.Replay != "" || item.Duration != "" || item.Error != "",
+			title:       strings.TrimSpace(item.Title),
 			running:     false,
 			exitCode:    item.ExitCode,
 			duration:    item.Duration,
-			errText:     item.Error,
+			errText:     errText,
 			replay:      []byte(item.Replay),
 			attachments: make(map[uint64]func(workbenchServerMessage)),
-		}
-		if item.Running && session.errText == "" {
-			session.errText = "session unavailable after service restart"
 		}
 		m.sessions[session.id] = session
 	}
@@ -726,6 +892,9 @@ func (m *workbenchManager) persistedSessions() []workbenchPersistedSession {
 	items := make([]workbenchPersistedSession, 0, len(sessions))
 	for _, session := range sessions {
 		snap := session.snapshot()
+		if !snap.Submitted {
+			continue
+		}
 		items = append(items, workbenchPersistedSession{
 			ID:         snap.ID,
 			RequestID:  snap.RequestID,
@@ -736,6 +905,8 @@ func (m *workbenchManager) persistedSessions() []workbenchPersistedSession {
 			WorkDir:    snap.WorkDir,
 			StartedAt:  snap.StartedAt,
 			LastActive: snap.LastActive,
+			Submitted:  snap.Submitted,
+			Title:      snap.Title,
 			Running:    snap.Running,
 			ExitCode:   snap.ExitCode,
 			Duration:   snap.Duration,
@@ -787,6 +958,8 @@ func (s *workbenchSession) snapshotLocked() workbenchSnapshot {
 		WorkDir:    s.workDir,
 		StartedAt:  s.startedAt,
 		LastActive: s.lastActive,
+		Submitted:  s.submitted,
+		Title:      s.title,
 		Running:    s.running,
 		ExitCode:   s.exitCode,
 		Duration:   s.duration,
@@ -795,29 +968,109 @@ func (s *workbenchSession) snapshotLocked() workbenchSnapshot {
 	}
 }
 
+func replayForAttach(snapshot workbenchSnapshot) string {
+	if snapshot.Running || len(snapshot.Replay) <= workbenchHistoricalReplayMax {
+		return snapshot.Replay
+	}
+	replay := trimUTF8Replay([]byte(snapshot.Replay), workbenchHistoricalReplayMax)
+	return "\r\n\x1b[2m[showing last 128 KiB of saved session output]\x1b[0m\r\n" + validUTF8String(replay)
+}
+
 func (s *workbenchSession) touch() {
 	s.mu.Lock()
 	s.lastActive = time.Now()
 	s.mu.Unlock()
 }
 
-func (s *workbenchSession) Write(data []byte) error {
-	s.touch()
-	if s.interactive == nil {
-		return errors.New("agent session is not ready")
+func (s *workbenchSession) isLive() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.running && s.interactive != nil
+}
+
+func (s *workbenchSession) callbacks() []func(workbenchServerMessage) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	callbacks := make([]func(workbenchServerMessage), 0, len(s.attachments))
+	for _, callback := range s.attachments {
+		callbacks = append(callbacks, callback)
 	}
-	return s.interactive.Write(data)
+	return callbacks
+}
+
+func (s *workbenchSession) isSubmitted() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.submitted
+}
+
+func (s *workbenchSession) markSubmitted(title string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.submitted {
+		return false
+	}
+	s.submitted = true
+	s.title = cleanSessionTitle(title)
+	s.lastActive = time.Now()
+	return true
+}
+
+func (s *workbenchSession) captureSubmitTitle(data string) (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.submitted {
+		return "", false
+	}
+	candidate, submitted, nextBuffer := updateSessionInputBuffer(s.inputBuffer, data)
+	s.inputBuffer = nextBuffer
+	if !submitted {
+		return "", false
+	}
+	candidate = cleanSessionTitle(candidate)
+	if candidate == "" {
+		return "", false
+	}
+	s.submitted = true
+	s.title = candidate
+	s.lastActive = time.Now()
+	return s.title, true
+}
+
+func (s *workbenchSession) Write(data []byte) error {
+	return s.WriteWithTitle(data, "")
+}
+
+func (s *workbenchSession) WriteWithTitle(data []byte, title string) error {
+	s.mu.Lock()
+	running := s.running
+	interactive := s.interactive
+	s.lastActive = time.Now()
+	s.mu.Unlock()
+	if !running || interactive == nil {
+		return errWorkbenchSessionNotRunning
+	}
+	if writer, ok := interactive.(interface {
+		WriteWithTitle([]byte, string) error
+	}); ok {
+		return writer.WriteWithTitle(data, title)
+	}
+	return interactive.Write(data)
 }
 
 func (s *workbenchSession) Resize(rows, cols uint16) error {
 	if rows == 0 || cols == 0 {
 		return nil
 	}
-	s.touch()
-	if s.interactive == nil {
-		return errors.New("agent session is not ready")
+	s.mu.Lock()
+	running := s.running
+	interactive := s.interactive
+	s.lastActive = time.Now()
+	s.mu.Unlock()
+	if !running || interactive == nil {
+		return errWorkbenchSessionNotRunning
 	}
-	return s.interactive.Resize(rows, cols)
+	return interactive.Resize(rows, cols)
 }
 
 func (s *workbenchSession) Close() {
@@ -930,23 +1183,69 @@ func (s *Server) accountRegister(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	if s.buckets != nil && !rateLimit(s.buckets.register, clientIP(r), w) {
+		return
+	}
 	var payload accountAuthPayload
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	authCfg := s.publicAuthSettingsConfig()
+	email := strings.ToLower(strings.TrimSpace(payload.Email))
+	code := strings.TrimSpace(payload.Code)
+
+	// When the deployment requires email on registration, the user must also
+	// have proven control of the address by supplying a verification code that
+	// was just mailed to them via /accounts/register/send-code.
+	if authCfg.RequireEmailOnRegister {
+		if email == "" {
+			http.Error(w, "email is required", http.StatusBadRequest)
+			return
+		}
+		if !isPlausibleEmail(email) {
+			http.Error(w, "email format is invalid", http.StatusBadRequest)
+			return
+		}
+		if code == "" {
+			http.Error(w, "code is required", http.StatusBadRequest)
+			return
+		}
+		if s.accountStore().IsEmailUsed(email, "") {
+			http.Error(w, "email is already used by another account", http.StatusConflict)
+			return
+		}
+		if err := s.accountStore().ConsumeRegistrationCode(email, code); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+
 	session, err := s.accountStore().Register(payload.Username, payload.Password, s.config.Snapshot().Policy)
 	if err != nil {
 		status := http.StatusBadRequest
 		if strings.Contains(err.Error(), "disabled") {
 			status = http.StatusForbidden
 		}
+		if strings.Contains(err.Error(), "already exists") {
+			status = http.StatusConflict
+		}
 		http.Error(w, err.Error(), status)
 		return
 	}
+
+	username := session.Username
+	if email != "" {
+		if err := s.accountStore().SetEmail(username, email); err != nil {
+			s.logger.Warn("set email post-register", "username", username, "error", err)
+		} else if err := s.accountStore().MarkEmailVerified(username, email); err != nil {
+			s.logger.Warn("mark email verified post-register", "username", username, "error", err)
+		}
+	}
+
 	s.setWorkbenchCookie(w, r, session.SessionID)
 	s.setAccountCookie(w, r, session.SessionID)
-	writeJSON(w, http.StatusOK, s.accountAuthResponse(session.Username))
+	writeJSON(w, http.StatusOK, s.accountAuthResponse(username))
 }
 
 func (s *Server) accountLogin(w http.ResponseWriter, r *http.Request) {
@@ -964,6 +1263,38 @@ func (s *Server) accountLogin(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
+	}
+	authCfg := s.publicAuthSettingsConfig()
+	rec, ok := s.accountStore().AccountRecord(session.Username)
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	role := s.accountRole(session.Username)
+	if role != accountRoleAdmin {
+		if rec.Email == "" && authCfg.RequireEmailOnRegister {
+			// Old account without email — force back-fill on next step.
+			s.accountStore().RevokeSession(session.SessionID)
+			writeJSON(w, http.StatusUnauthorized, map[string]any{
+				"error":             "email_required",
+				"username":          session.Username,
+				"requires_email":    true,
+				"message":           "请补填邮箱以完成账户升级",
+				"continue_password": payload.Password,
+			})
+			return
+		}
+		if rec.Email != "" && authCfg.RequireEmailVerifiedToLogin && !rec.EmailVerified {
+			s.accountStore().RevokeSession(session.SessionID)
+			writeJSON(w, http.StatusForbidden, map[string]any{
+				"error":           "email_not_verified",
+				"username":        session.Username,
+				"email":           rec.Email,
+				"requires_verify": true,
+				"message":         "请先完成邮箱验证",
+			})
+			return
+		}
 	}
 	s.setWorkbenchCookie(w, r, session.SessionID)
 	s.setAccountCookie(w, r, session.SessionID)
@@ -1038,11 +1369,14 @@ func (s *Server) accountTunnelSession(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) accountAuthResponse(account string) map[string]any {
+	rec, _ := s.accountStore().AccountRecord(account)
 	return map[string]any{
 		"username":             account,
 		"role":                 s.accountRole(account),
 		"registration_enabled": s.accountStore().RegistrationEnabled(),
 		"state":                s.workbenchStatePayload(account),
+		"email":                rec.Email,
+		"email_verified":       rec.EmailVerified,
 	}
 }
 
@@ -1063,7 +1397,11 @@ func (s *Server) setWorkbenchCookie(w http.ResponseWriter, r *http.Request, valu
 		Path:     "/",
 		MaxAge:   30 * 24 * 60 * 60,
 		HttpOnly: true,
-		SameSite: http.SameSiteStrictMode,
+		// Lax (not Strict) so the cookie survives OAuth's cross-site redirect
+		// chain back to /user/. Strict drops cookies on the top-level GET that
+		// follows a redirect from a different origin, which left users bouncing
+		// back to /user/login.html after Google sign-in.
+		SameSite: http.SameSiteLaxMode,
 		Secure:   secureRequest(r),
 	})
 }
@@ -1075,7 +1413,7 @@ func (s *Server) setAccountCookie(w http.ResponseWriter, r *http.Request, value 
 		Path:     "/",
 		MaxAge:   30 * 24 * 60 * 60,
 		HttpOnly: true,
-		SameSite: http.SameSiteStrictMode,
+		SameSite: http.SameSiteLaxMode,
 		Secure:   secureRequest(r),
 	})
 }
@@ -1101,7 +1439,7 @@ func (s *Server) clearWorkbenchCookie(w http.ResponseWriter, r *http.Request) {
 		Path:     "/",
 		MaxAge:   -1,
 		HttpOnly: true,
-		SameSite: http.SameSiteStrictMode,
+		SameSite: http.SameSiteLaxMode,
 		Secure:   secureRequest(r),
 	})
 }
@@ -1113,7 +1451,7 @@ func (s *Server) clearAccountCookie(w http.ResponseWriter, r *http.Request) {
 		Path:     "/",
 		MaxAge:   -1,
 		HttpOnly: true,
-		SameSite: http.SameSiteStrictMode,
+		SameSite: http.SameSiteLaxMode,
 		Secure:   secureRequest(r),
 	})
 }
@@ -1152,11 +1490,49 @@ func (s *Server) accountFromRequest(r *http.Request) (string, bool) {
 
 func (s *Server) accountIdentityFromRequest(r *http.Request) (accountIdentity, bool) {
 	sessionID := accountRequestSessionID(r)
+	if sessionID == "" {
+		if s != nil && s.logger != nil && r != nil && shouldDiagAuth(r.URL.Path) {
+			s.logger.Warn("[OAUTH-DIAG] account auth: no session cookie",
+				"path", r.URL.Path,
+				"host", r.Host,
+				"cookies", cookieNamesFromRequest(r))
+		}
+		return accountIdentity{}, false
+	}
 	account, ok := s.accountStore().ValidateSessionInfo(sessionID)
 	if !ok {
+		if s != nil && s.logger != nil && r != nil && shouldDiagAuth(r.URL.Path) {
+			s.logger.Warn("[OAUTH-DIAG] account auth: cookie present but session invalid",
+				"path", r.URL.Path,
+				"session_id_prefix", safeSessionPrefix(sessionID))
+		}
 		return accountIdentity{}, false
 	}
 	return accountIdentity{Username: account.Username, Role: account.Role}, true
+}
+
+func shouldDiagAuth(path string) bool {
+	switch {
+	case path == "/user/", path == "/admin/", path == "/":
+		return true
+	case strings.HasPrefix(path, "/cloud-terminal-api/accounts/me"),
+		strings.HasPrefix(path, "/cloud-terminal-api/user/"),
+		strings.HasPrefix(path, "/cloud-terminal-api/workbench/"):
+		return true
+	}
+	return false
+}
+
+func cookieNamesFromRequest(r *http.Request) []string {
+	if r == nil {
+		return nil
+	}
+	cookies := r.Cookies()
+	names := make([]string, 0, len(cookies))
+	for _, c := range cookies {
+		names = append(names, c.Name)
+	}
+	return names
 }
 
 func workbenchRequestSessionID(r *http.Request) string {
@@ -1190,13 +1566,21 @@ func (s *Server) workbenchStatePayload(account string) workbenchStatePayload {
 	account = normalizeTunnelAccount(account)
 	cfg := s.config.Snapshot()
 	policyCfg := s.policyForAccount(account, cfg.Policy)
+	archive := s.archiveStateForAccount(account, cfg.Policy)
 	if s.runtimeIsTunnel() {
+		edgeStatus, lastSeen := s.tunnel.statusForAccount(account)
+		lastSeenStr := ""
+		if !lastSeen.IsZero() {
+			lastSeenStr = formatTime(lastSeen)
+		}
 		client := s.tunnelClientForAccount(account)
 		if client == nil {
-			return workbenchStatePayload{
+			payload := workbenchStatePayload{
 				EdgeID:       s.edgeID,
 				EdgeName:     s.edgeName,
 				EdgeOnline:   false,
+				EdgeStatus:   edgeStatus,
+				LastSeen:     lastSeenStr,
 				Tunnel:       true,
 				WorkDir:      "",
 				AllowPaths:   slices.Clone(policyCfg.AllowPaths),
@@ -1204,14 +1588,17 @@ func (s *Server) workbenchStatePayload(account string) workbenchStatePayload {
 				Agents:       disabledWorkbenchAgents(),
 				Sessions:     s.workbench.list(account, policyCfg.AllowPaths, policyCfg.RequirePathMatch),
 			}
+			return applyWorkbenchArchiveState(payload, archive)
 		}
 		info := client.info()
 		edgePaths := filterAllowedPaths(policyCfg.AllowPaths, info.allowPaths)
 		workDir := defaultWorkbenchPath(info.workDir, edgePaths, policyCfg.RequirePathMatch)
-		return workbenchStatePayload{
+		payload := workbenchStatePayload{
 			EdgeID:       info.edgeID,
 			EdgeName:     info.edgeName,
 			EdgeOnline:   true,
+			EdgeStatus:   edgeStatus,
+			LastSeen:     lastSeenStr,
 			Tunnel:       true,
 			WorkDir:      workDir,
 			AllowPaths:   slices.Clone(policyCfg.AllowPaths),
@@ -1220,11 +1607,13 @@ func (s *Server) workbenchStatePayload(account string) workbenchStatePayload {
 			Agents:       filterWorkbenchAgentsForPolicy(info.agents, policyCfg),
 			Sessions:     mergeWorkbenchSessions(s.workbench.list(account, edgePaths, policyCfg.RequirePathMatch), filterWorkbenchSessionsToPolicy(info.sessions, edgePaths, policyCfg.RequirePathMatch), account),
 		}
+		return applyWorkbenchArchiveState(payload, archive)
 	}
-	return workbenchStatePayload{
+	payload := workbenchStatePayload{
 		EdgeID:       s.edgeID,
 		EdgeName:     s.edgeName,
 		EdgeOnline:   true,
+		EdgeStatus:   "online",
 		Tunnel:       false,
 		WorkDir:      defaultWorkbenchPath(cfg.Edge.WorkDir, policyCfg.AllowPaths, policyCfg.RequirePathMatch),
 		AllowPaths:   slices.Clone(policyCfg.AllowPaths),
@@ -1232,6 +1621,76 @@ func (s *Server) workbenchStatePayload(account string) workbenchStatePayload {
 		Agents:       listWorkbenchAgentsForPolicy(policyCfg),
 		Sessions:     s.workbench.list(account, policyCfg.AllowPaths, policyCfg.RequirePathMatch),
 	}
+	return applyWorkbenchArchiveState(payload, archive)
+}
+
+type workbenchArchiveState struct {
+	ArchivedFolders   []string
+	ArchivedSessions  []string
+	ForgottenFolders  []string
+	ForgottenSessions []string
+}
+
+func (s *Server) archiveStateForAccount(account string, global policy.Config) workbenchArchiveState {
+	if s.accountStore() == nil || account == "" {
+		return workbenchArchiveState{}
+	}
+	settings, err := s.accountStore().UserSettings(account, global)
+	if err != nil {
+		return workbenchArchiveState{}
+	}
+	settings = normalizeUserSettings(settings)
+	return workbenchArchiveState{
+		ArchivedFolders:   slices.Clone(settings.ArchivedFolders),
+		ArchivedSessions:  slices.Clone(settings.ArchivedSessions),
+		ForgottenFolders:  slices.Clone(settings.ForgottenFolders),
+		ForgottenSessions: slices.Clone(settings.ForgottenSessions),
+	}
+}
+
+func applyWorkbenchArchiveState(payload workbenchStatePayload, archive workbenchArchiveState) workbenchStatePayload {
+	payload.ArchivedFolders = slices.Clone(archive.ArchivedFolders)
+	payload.ArchivedSessions = slices.Clone(archive.ArchivedSessions)
+	payload.ForgottenFolders = slices.Clone(archive.ForgottenFolders)
+	payload.ForgottenSessions = slices.Clone(archive.ForgottenSessions)
+
+	archivedFolderSet := stringSet(archive.ArchivedFolders)
+	archivedSessionSet := stringSet(archive.ArchivedSessions)
+	forgottenFolderSet := stringSet(archive.ForgottenFolders)
+	forgottenSessionSet := stringSet(archive.ForgottenSessions)
+
+	visible := make([]workbenchSessionInfo, 0, len(payload.Sessions))
+	archivedItems := make([]workbenchSessionInfo, 0)
+	for _, session := range payload.Sessions {
+		if _, ok := forgottenSessionSet[session.ID]; ok {
+			continue
+		}
+		if _, ok := forgottenFolderSet[session.WorkDir]; ok {
+			continue
+		}
+		if _, ok := archivedSessionSet[session.ID]; ok {
+			archivedItems = append(archivedItems, session)
+			continue
+		}
+		if _, ok := archivedFolderSet[session.WorkDir]; ok {
+			continue
+		}
+		visible = append(visible, session)
+	}
+	payload.Sessions = visible
+	payload.ArchivedSessionItems = archivedItems
+	return payload
+}
+
+func stringSet(values []string) map[string]struct{} {
+	out := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			out[value] = struct{}{}
+		}
+	}
+	return out
 }
 
 func (s *Server) policyForAccount(account string, global policy.Config) policy.Config {
@@ -1251,6 +1710,31 @@ func disabledWorkbenchAgents() []workbenchAgentInfo {
 		{ID: "claude", Label: "Claude Code", Command: "claude", Enabled: false},
 		{ID: "gemini", Label: "Gemini", Command: "gemini", Enabled: false},
 	}
+}
+
+func (s *Server) publishTunnelSession(snap workbenchSnapshot) {
+	if !snap.Submitted {
+		return
+	}
+	client := s.tunnelClientForAccount(snap.Account)
+	if client == nil {
+		return
+	}
+	client.updateSession(workbenchSessionInfo{
+		ID:         snap.ID,
+		Account:    snap.Account,
+		Agent:      snap.Agent,
+		AgentLabel: workbenchAgentLabel(snap.Agent),
+		WorkDir:    snap.WorkDir,
+		StartedAt:  formatTime(snap.StartedAt),
+		LastActive: formatTime(snap.LastActive),
+		Submitted:  snap.Submitted,
+		Title:      snap.Title,
+		Running:    snap.Running,
+		ExitCode:   snap.ExitCode,
+		Duration:   snap.Duration,
+		Error:      snap.Error,
+	})
 }
 
 func filterWorkbenchAgentsForPolicy(agents []workbenchAgentInfo, policyCfg policy.Config) []workbenchAgentInfo {
@@ -1295,25 +1779,32 @@ func mergeWorkbenchSessions(primary []workbenchSessionInfo, secondary []workbenc
 		return primary
 	}
 	account = normalizeTunnelAccount(account)
-	seen := make(map[string]struct{}, len(primary)+len(secondary))
+	seen := make(map[string]int, len(primary)+len(secondary))
 	merged := make([]workbenchSessionInfo, 0, len(primary)+len(secondary))
 	for _, item := range primary {
 		if strings.TrimSpace(item.ID) == "" {
 			continue
 		}
-		seen[item.ID] = struct{}{}
+		seen[item.ID] = len(merged)
 		merged = append(merged, item)
 	}
 	for _, item := range secondary {
 		if strings.TrimSpace(item.ID) == "" {
 			continue
 		}
+		if !item.Submitted {
+			continue
+		}
 		if account != "" && normalizeTunnelAccount(item.Account) != account {
 			continue
 		}
-		if _, ok := seen[item.ID]; ok {
+		if index, ok := seen[item.ID]; ok {
+			if item.Running && !merged[index].Running {
+				merged[index] = item
+			}
 			continue
 		}
+		seen[item.ID] = len(merged)
 		merged = append(merged, item)
 	}
 	slices.SortFunc(merged, func(a, b workbenchSessionInfo) int {
@@ -1323,11 +1814,11 @@ func mergeWorkbenchSessions(primary []workbenchSessionInfo, secondary []workbenc
 }
 
 func filterWorkbenchSessionsToPolicy(sessions []workbenchSessionInfo, allowPaths []string, requirePathMatch bool) []workbenchSessionInfo {
-	if len(allowPaths) == 0 && !requirePathMatch {
-		return slices.Clone(sessions)
-	}
 	filtered := make([]workbenchSessionInfo, 0, len(sessions))
 	for _, item := range sessions {
+		if !item.Submitted {
+			continue
+		}
 		if workbenchSessionAllowedByPolicy(item.WorkDir, allowPaths, requirePathMatch) {
 			filtered = append(filtered, item)
 		}
@@ -1340,6 +1831,67 @@ func workbenchSessionAllowedByPolicy(workDir string, allowPaths []string, requir
 		return !requirePathMatch
 	}
 	return pathWithinAllowed(workDir, allowPaths)
+}
+
+func cleanSessionTitle(value string) string {
+	fields := strings.FieldsFunc(value, func(r rune) bool {
+		return r == '\r' || r == '\n'
+	})
+	if len(fields) == 0 {
+		return ""
+	}
+	title := strings.TrimSpace(fields[0])
+	title = strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, title)
+	title = strings.Join(strings.Fields(title), " ")
+	if len([]rune(title)) > 60 {
+		return string([]rune(title)[:60])
+	}
+	return title
+}
+
+func updateSessionInputBuffer(buffer string, data string) (string, bool, string) {
+	if data == "" {
+		return "", false, trimSessionInputBuffer(buffer)
+	}
+	var submitted strings.Builder
+	var next strings.Builder
+	next.WriteString(buffer)
+	for _, r := range data {
+		switch r {
+		case '\r', '\n':
+			candidate := cleanSessionTitle(next.String())
+			if candidate != "" {
+				submitted.WriteString(candidate)
+				return submitted.String(), true, ""
+			}
+			next.Reset()
+		case '\b', 0x7f:
+			current := []rune(next.String())
+			if len(current) > 0 {
+				next.Reset()
+				next.WriteString(string(current[:len(current)-1]))
+			}
+		default:
+			if r < 0x20 || r == 0x7f {
+				continue
+			}
+			next.WriteRune(r)
+		}
+	}
+	return "", false, trimSessionInputBuffer(next.String())
+}
+
+func trimSessionInputBuffer(value string) string {
+	runes := []rune(value)
+	if len(runes) <= 256 {
+		return value
+	}
+	return string(runes[len(runes)-256:])
 }
 
 func filterWorkbenchFileEntriesToPolicy(entries []workbenchFileEntry, allowPaths []string) []workbenchFileEntry {
@@ -1458,9 +2010,11 @@ func (s *Server) workbenchWS(w http.ResponseWriter, r *http.Request) {
 		StartedAt:  formatTime(snapshot.StartedAt),
 		LastActive: formatTime(snapshot.LastActive),
 		Running:    snapshot.Running,
+		Submitted:  snapshot.Submitted,
+		Title:      snapshot.Title,
 	})
-	if snapshot.Replay != "" {
-		send(workbenchServerMessage{Type: "replay", SessionID: snapshot.ID, Data: snapshot.Replay})
+	if replay := replayForAttach(snapshot); replay != "" {
+		send(workbenchServerMessage{Type: "replay", SessionID: snapshot.ID, Data: replay})
 	}
 	if !snapshot.Running {
 		send(workbenchServerMessage{
@@ -1493,15 +2047,48 @@ func (s *Server) workbenchWS(w http.ResponseWriter, r *http.Request) {
 
 		switch msg.Type {
 		case "input":
-			if err := session.Write([]byte(msg.Data)); err != nil {
+			if !session.isLive() {
+				send(workbenchServerMessage{Type: "error", SessionID: snapshot.ID, Error: errWorkbenchSessionNotRunning.Error()})
+				continue
+			}
+			title := ""
+			if nextTitle, ok := session.captureSubmitTitle(msg.Data); ok {
+				title = nextTitle
+				snapshot = session.snapshot()
+				submitted := workbenchServerMessage{
+					Type:       "submitted",
+					SessionID:  snapshot.ID,
+					EdgeID:     snapshot.EdgeID,
+					EdgeName:   snapshot.EdgeName,
+					Agent:      snapshot.Agent,
+					AgentLabel: workbenchAgentLabel(snapshot.Agent),
+					WorkDir:    snapshot.WorkDir,
+					StartedAt:  formatTime(snapshot.StartedAt),
+					LastActive: formatTime(snapshot.LastActive),
+					Running:    snapshot.Running,
+					Submitted:  snapshot.Submitted,
+					Title:      title,
+				}
+				send(submitted)
+				s.workbench.publishSession(snapshot)
+				if s.runtimeIsTunnel() {
+					s.publishTunnelSession(snapshot)
+				}
+			}
+			if err := session.WriteWithTitle([]byte(msg.Data), title); err != nil {
 				send(workbenchServerMessage{Type: "error", SessionID: snapshot.ID, Error: err.Error()})
 			}
 		case "resize":
+			if !session.isLive() {
+				continue
+			}
 			if err := session.Resize(msg.Rows, msg.Cols); err != nil {
 				send(workbenchServerMessage{Type: "error", SessionID: snapshot.ID, Error: err.Error()})
 			}
 		case "stop":
-			session.Close()
+			if session.isLive() {
+				session.Close()
+			}
 		case "ping":
 			send(workbenchServerMessage{Type: "pong", SessionID: snapshot.ID})
 		default:
@@ -1849,6 +2436,20 @@ func (s *Server) workbenchDiff(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, response)
 }
 
+const previewBodyMax = 20 << 20 // 20 MiB cap on both request and response bodies
+
+var previewHopByHopHeaders = map[string]struct{}{
+	"connection":          {},
+	"proxy-connection":    {},
+	"keep-alive":          {},
+	"proxy-authenticate":  {},
+	"proxy-authorization": {},
+	"te":                  {},
+	"trailer":             {},
+	"transfer-encoding":   {},
+	"upgrade":             {},
+}
+
 func (s *Server) workbenchPreview(w http.ResponseWriter, r *http.Request) {
 	portValue := strings.TrimSpace(r.URL.Query().Get("port"))
 	if portValue == "" {
@@ -1860,13 +2461,15 @@ func (s *Server) workbenchPreview(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid port", http.StatusBadRequest)
 		return
 	}
-	if !s.previewPortAllowed(port) {
-		http.Error(w, "port is not allowlisted", http.StatusForbidden)
-		return
-	}
 
-	target := &url.URL{Scheme: "http", Host: net.JoinHostPort("127.0.0.1", strconv.Itoa(port))}
-	s.servePreviewProxy(w, r, target, r.URL.Query().Get("path"), r.URL.Query().Get("query"))
+	proxyPath := r.URL.Query().Get("path")
+	if proxyPath == "" {
+		proxyPath = "/"
+	}
+	if !strings.HasPrefix(proxyPath, "/") {
+		proxyPath = "/" + proxyPath
+	}
+	s.dispatchPreview(w, r, port, proxyPath, r.URL.Query().Get("query"))
 }
 
 func (s *Server) workbenchPreviewPath(w http.ResponseWriter, r *http.Request) {
@@ -1881,17 +2484,140 @@ func (s *Server) workbenchPreviewPath(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid port", http.StatusBadRequest)
 		return
 	}
-	if !s.previewPortAllowed(port) {
-		http.Error(w, "port is not allowlisted", http.StatusForbidden)
-		return
-	}
 
 	proxyPath := "/"
 	if len(parts) == 2 && parts[1] != "" {
 		proxyPath += parts[1]
 	}
+	s.dispatchPreview(w, r, port, proxyPath, r.URL.RawQuery)
+}
+
+// dispatchPreview picks the right backend for the preview:
+//   - tunnel mode: forward the request through the requesting user's tunnel to
+//     the agent, which dials 127.0.0.1:port on the user's own machine.
+//   - local mode: keep the original reverse-proxy to the gateway's own loopback
+//     (single-machine deployments only).
+func (s *Server) dispatchPreview(w http.ResponseWriter, r *http.Request, port int, proxyPath string, proxyQuery string) {
+	if s.runtimeIsTunnel() {
+		identity, _ := s.workbenchIdentity(r)
+		client := s.tunnelClientForAccount(identity.Account)
+		if client == nil {
+			http.Error(w, tunnelUnavailable().Error(), http.StatusServiceUnavailable)
+			return
+		}
+		if !previewPortAllowedForClient(client, port) {
+			http.Error(w, "port is not allowlisted", http.StatusForbidden)
+			return
+		}
+		s.servePreviewTunnel(w, r, client, port, proxyPath, proxyQuery)
+		return
+	}
+
+	if !s.previewPortAllowed(port) {
+		http.Error(w, "port is not allowlisted", http.StatusForbidden)
+		return
+	}
 	target := &url.URL{Scheme: "http", Host: net.JoinHostPort("127.0.0.1", strconv.Itoa(port))}
-	s.servePreviewProxy(w, r, target, proxyPath, r.URL.RawQuery)
+	s.servePreviewProxy(w, r, target, proxyPath, proxyQuery)
+}
+
+// servePreviewTunnel forwards a preview HTTP request through the user's tunnel.
+// Body is buffered both ways (capped at previewBodyMax) — streaming is out of
+// scope for now and WebSocket upgrades are rejected.
+func (s *Server) servePreviewTunnel(w http.ResponseWriter, r *http.Request, client *tunnelClient, port int, proxyPath string, proxyQuery string) {
+	if isWebSocketUpgrade(r) {
+		http.Error(w, "websocket preview is not supported over tunnel", http.StatusBadGateway)
+		return
+	}
+
+	body, err := readLimitedBody(r.Body, previewBodyMax)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusRequestEntityTooLarge)
+		return
+	}
+	_ = r.Body.Close()
+
+	fullPath := proxyPath
+	if proxyQuery != "" {
+		fullPath += "?" + proxyQuery
+	}
+
+	headers := cloneHeaderForProxy(r.Header)
+
+	var resp tunnelPreviewResponse
+	if err := client.request(r.Context(), "preview", tunnelPreviewRequest{
+		Port:    port,
+		Method:  r.Method,
+		Path:    fullPath,
+		Headers: headers,
+		Body:    body,
+	}, &resp); err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+
+	dst := w.Header()
+	for key, values := range resp.Headers {
+		lower := strings.ToLower(key)
+		if _, hop := previewHopByHopHeaders[lower]; hop {
+			continue
+		}
+		if lower == "x-frame-options" || lower == "content-security-policy" {
+			continue
+		}
+		for _, value := range values {
+			dst.Add(key, value)
+		}
+	}
+	status := resp.Status
+	if status == 0 {
+		status = http.StatusOK
+	}
+	w.WriteHeader(status)
+	if len(resp.Body) > 0 {
+		_, _ = w.Write(resp.Body)
+	}
+}
+
+func readLimitedBody(r io.Reader, max int64) ([]byte, error) {
+	if r == nil {
+		return nil, nil
+	}
+	limited := io.LimitReader(r, max+1)
+	data, err := io.ReadAll(limited)
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > max {
+		return nil, fmt.Errorf("preview body exceeds %d bytes", max)
+	}
+	return data, nil
+}
+
+func cloneHeaderForProxy(src http.Header) map[string][]string {
+	if len(src) == 0 {
+		return nil
+	}
+	out := make(map[string][]string, len(src))
+	for key, values := range src {
+		lower := strings.ToLower(key)
+		if _, hop := previewHopByHopHeaders[lower]; hop {
+			continue
+		}
+		if lower == "cookie" || lower == "host" || lower == "content-length" {
+			continue
+		}
+		out[key] = append([]string(nil), values...)
+	}
+	return out
+}
+
+func isWebSocketUpgrade(r *http.Request) bool {
+	if !strings.EqualFold(r.Header.Get("Connection"), "upgrade") &&
+		!strings.Contains(strings.ToLower(r.Header.Get("Connection")), "upgrade") {
+		return false
+	}
+	return strings.EqualFold(r.Header.Get("Upgrade"), "websocket")
 }
 
 func (s *Server) servePreviewProxy(w http.ResponseWriter, r *http.Request, target *url.URL, proxyPath string, proxyQuery string) {
@@ -1920,6 +2646,21 @@ func (s *Server) servePreviewProxy(w http.ResponseWriter, r *http.Request, targe
 func (s *Server) previewPortAllowed(port int) bool {
 	cfg := s.config.Snapshot()
 	for _, allowed := range cfg.Edge.PreviewPorts {
+		if allowed == port {
+			return true
+		}
+	}
+	return false
+}
+
+// previewPortAllowedForClient checks against the ports the agent itself
+// announced in its tunnel hello — i.e. the user's own configuration.
+func previewPortAllowedForClient(client *tunnelClient, port int) bool {
+	if client == nil {
+		return false
+	}
+	info := client.info()
+	for _, allowed := range info.previewPorts {
 		if allowed == port {
 			return true
 		}

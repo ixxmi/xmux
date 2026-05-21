@@ -2,19 +2,23 @@ package gateway
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
+	"sync"
 	"testing"
 	"testing/fstest"
 	"time"
 
 	"cloud-terminal/internal/config"
 	"cloud-terminal/internal/edge"
+	"cloud-terminal/internal/mail"
 	"cloud-terminal/internal/policy"
 
 	"github.com/gorilla/websocket"
@@ -44,6 +48,23 @@ func TestRoutesUseCloudTerminalPrefixes(t *testing.T) {
 	}
 }
 
+func TestRoutesAcceptExternalPrefixWhenProxyDoesNotStrip(t *testing.T) {
+	t.Parallel()
+
+	server := NewServer(Options{
+		Config:   config.NewStore(t.TempDir()+"/policy.yaml", &config.Config{Server: config.ServerConfig{}, Policy: minimalPolicy()}),
+		StaticFS: fstest.MapFS{"index.html": &fstest.MapFile{Data: []byte("ok")}},
+	})
+	handler := server.Routes()
+
+	request := httptest.NewRequest(http.MethodGet, "/xmux/cloud-terminal-api/health", nil)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("prefixed health status = %d, want 200", response.Code)
+	}
+}
+
 func TestRootRedirectsToMobileWorkbench(t *testing.T) {
 	t.Parallel()
 
@@ -62,6 +83,72 @@ func TestRootRedirectsToMobileWorkbench(t *testing.T) {
 	}
 	if got := response.Header().Get("Location"); got != "/mobile/" {
 		t.Fatalf("root Location = %q, want /mobile/", got)
+	}
+}
+
+func TestRootRedirectKeepsForwardedPrefix(t *testing.T) {
+	t.Parallel()
+
+	server := NewServer(Options{
+		Config:   config.NewStore(t.TempDir()+"/policy.yaml", &config.Config{Server: config.ServerConfig{}, Policy: minimalPolicy()}),
+		StaticFS: fstest.MapFS{"mobile/index.html": &fstest.MapFile{Data: []byte("mobile")}},
+	})
+	handler := server.Routes()
+
+	request := httptest.NewRequest(http.MethodGet, "/", nil)
+	request.Header.Set("X-Forwarded-Prefix", "/xmux")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusFound {
+		t.Fatalf("root status = %d, want 302", response.Code)
+	}
+	if got := response.Header().Get("Location"); got != "/xmux/mobile/" {
+		t.Fatalf("root Location = %q, want /xmux/mobile/", got)
+	}
+}
+
+func TestUnknownStaticRouteNotServedByRootFileServer(t *testing.T) {
+	t.Parallel()
+
+	server := NewServer(Options{
+		Config: config.NewStore(t.TempDir()+"/policy.yaml", &config.Config{Server: config.ServerConfig{}, Policy: minimalPolicy()}),
+		StaticFS: fstest.MapFS{
+			"index.html":        &fstest.MapFile{Data: []byte("root")},
+			"mobile/index.html": &fstest.MapFile{Data: []byte("mobile")},
+		},
+	})
+	handler := server.Routes()
+
+	request := httptest.NewRequest(http.MethodGet, "/does-not-exist", nil)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("unknown route status = %d, want 404", response.Code)
+	}
+}
+
+func TestPageRouteWithoutTrailingSlashRedirectsWithPrefix(t *testing.T) {
+	t.Parallel()
+
+	server := NewServer(Options{
+		Config: config.NewStore(t.TempDir()+"/policy.yaml", &config.Config{Server: config.ServerConfig{}, Policy: minimalPolicy()}),
+		StaticFS: fstest.MapFS{
+			"mobile/index.html": &fstest.MapFile{Data: []byte("mobile")},
+		},
+	})
+	handler := server.Routes()
+
+	request := httptest.NewRequest(http.MethodGet, "/mobile", nil)
+	request.Header.Set("X-Forwarded-Prefix", "/xmux")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusMovedPermanently {
+		t.Fatalf("mobile route status = %d, want 301", response.Code)
+	}
+	if got := response.Header().Get("Location"); got != "/xmux/mobile/" {
+		t.Fatalf("mobile route Location = %q, want /xmux/mobile/", got)
 	}
 }
 
@@ -142,7 +229,7 @@ func TestAccountSessionAuthorizesLive(t *testing.T) {
 		},
 		Policy: minimalPolicy(),
 	})
-	cookies := registerTestAccount(t, server, "dev@example.com", "secret123")
+	cookies := registerTestAccount(t, server, "dev@example.com", "TestPassword1")
 	request := httptest.NewRequest(http.MethodGet, "/cloud-terminal-api/edge", nil)
 	for _, cookie := range cookies {
 		request.AddCookie(cookie)
@@ -177,7 +264,7 @@ func TestEdgeInfoDefaultsToAccountAllowPath(t *testing.T) {
 			Commands:   map[string]policy.CommandPolicy{"pwd": {Enabled: true}},
 		},
 	})
-	cookies := registerTestAccount(t, server, "user@example.com", "secret123")
+	cookies := registerTestAccount(t, server, "user@example.com", "TestPassword1")
 	if _, err := server.accountStore().SaveUserSettings("user@example.com", userSettingsUpdatePayload{
 		AllowPaths: []string{accountWorkDir},
 		Commands:   map[string]adminCommandPayload{"pwd": {Enabled: true}},
@@ -216,8 +303,14 @@ func TestAccountRegisterLoginAndWorkbenchState(t *testing.T) {
 		Policy: minimalPolicy(),
 	})
 	handler := server.Routes()
+	if server.appSettings != nil {
+		_ = server.appSettings.Set(appSettingKeyAuthSettings, authSettings{
+			RequireEmailOnRegister:      false,
+			RequireEmailVerifiedToLogin: false,
+		}, "test-suite")
+	}
 
-	registerBody := bytes.NewBufferString(`{"username":"dev@example.com","password":"secret123"}`)
+	registerBody := bytes.NewBufferString(`{"username":"dev@example.com","password":"TestPassword1"}`)
 	registerReq := httptest.NewRequest(http.MethodPost, "/cloud-terminal-api/accounts/register", registerBody)
 	registerReq.Header.Set("Content-Type", "application/json")
 	registerResp := httptest.NewRecorder()
@@ -250,7 +343,7 @@ func TestAccountRegisterLoginAndWorkbenchState(t *testing.T) {
 		t.Fatalf("state status = %d body = %s", stateResp.Code, stateResp.Body.String())
 	}
 
-	loginBody := bytes.NewBufferString(`{"username":"dev@example.com","password":"secret123"}`)
+	loginBody := bytes.NewBufferString(`{"username":"dev@example.com","password":"TestPassword1"}`)
 	loginReq := httptest.NewRequest(http.MethodPost, "/cloud-terminal-api/accounts/login", loginBody)
 	loginReq.Header.Set("Content-Type", "application/json")
 	loginResp := httptest.NewRecorder()
@@ -268,9 +361,9 @@ func TestAccountCanUpdateOwnPassword(t *testing.T) {
 		Policy: minimalPolicy(),
 	})
 	handler := server.Routes()
-	cookies := registerTestAccount(t, server, "dev@example.com", "secret123")
+	cookies := registerTestAccount(t, server, "dev@example.com", "TestPassword1")
 
-	body := bytes.NewBufferString(`{"current_password":"wrong","new_password":"changed123"}`)
+	body := bytes.NewBufferString(`{"current_password":"wrong","new_password":"ChangedPass1"}`)
 	req := httptest.NewRequest(http.MethodPut, "/cloud-terminal-api/accounts/me", body)
 	req.Header.Set("Content-Type", "application/json")
 	for _, cookie := range cookies {
@@ -282,7 +375,7 @@ func TestAccountCanUpdateOwnPassword(t *testing.T) {
 		t.Fatalf("wrong password update status = %d body = %s", resp.Code, resp.Body.String())
 	}
 
-	body = bytes.NewBufferString(`{"current_password":"secret123","new_password":"changed123"}`)
+	body = bytes.NewBufferString(`{"current_password":"TestPassword1","new_password":"ChangedPass1"}`)
 	req = httptest.NewRequest(http.MethodPut, "/cloud-terminal-api/accounts/me", body)
 	req.Header.Set("Content-Type", "application/json")
 	for _, cookie := range cookies {
@@ -293,7 +386,7 @@ func TestAccountCanUpdateOwnPassword(t *testing.T) {
 	if resp.Code != http.StatusOK {
 		t.Fatalf("password update status = %d body = %s", resp.Code, resp.Body.String())
 	}
-	if !server.accountStore().VerifyPassword("dev@example.com", "changed123") {
+	if !server.accountStore().VerifyPassword("dev@example.com", "ChangedPass1") {
 		t.Fatal("expected updated password to verify")
 	}
 }
@@ -313,7 +406,7 @@ func TestDefaultAdminCanManageAccounts(t *testing.T) {
 	handler := server.Routes()
 
 	adminCookies := loginTestAccount(t, server, "admin", "admin123456")
-	createBody := bytes.NewBufferString(`{"username":"managed@example.com","password":"secret123","role":"user"}`)
+	createBody := bytes.NewBufferString(`{"username":"managed@example.com","password":"TestPassword1","role":"user"}`)
 	createReq := httptest.NewRequest(http.MethodPost, "/cloud-terminal-api/admin/accounts", createBody)
 	createReq.Header.Set("Content-Type", "application/json")
 	for _, cookie := range adminCookies {
@@ -339,6 +432,228 @@ func TestDefaultAdminCanManageAccounts(t *testing.T) {
 	}
 }
 
+func TestRegistrationGatedByEmailVerification(t *testing.T) {
+	t.Parallel()
+
+	server := testServer(t, config.Config{
+		Server: config.ServerConfig{
+			AccountStorePath:           filepath.Join(t.TempDir(), "accounts.json"),
+			AccountRegistrationEnabled: testBoolPtr(true),
+		},
+		Policy: minimalPolicy(),
+	})
+	_ = server.appSettings.Set(appSettingKeyAuthSettings, authSettings{
+		RequireEmailOnRegister:      true,
+		RequireEmailVerifiedToLogin: false,
+	}, "test-suite")
+	server.reloadMailerLocked()
+	captured := &capturingMailSender{}
+	server.mailer.Set(captured)
+	handler := server.Routes()
+
+	postJSON := func(path, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, path, bytes.NewBufferString(body))
+		req.Header.Set("Content-Type", "application/json")
+		resp := httptest.NewRecorder()
+		handler.ServeHTTP(resp, req)
+		return resp
+	}
+
+	// Registering without a code while email is required should fail.
+	resp := postJSON("/cloud-terminal-api/accounts/register", `{"username":"pending@example.com","password":"TestPassword1","email":"pending@example.com"}`)
+	if resp.Code != http.StatusBadRequest || !strings.Contains(resp.Body.String(), "code") {
+		t.Fatalf("expected 400 code-required, got %d body=%s", resp.Code, resp.Body.String())
+	}
+
+	// Ask for a code, capture from the mail body.
+	sendResp := postJSON("/cloud-terminal-api/accounts/register/send-code", `{"email":"pending@example.com"}`)
+	if sendResp.Code != http.StatusOK {
+		t.Fatalf("send-code status = %d body = %s", sendResp.Code, sendResp.Body.String())
+	}
+	msg := captured.Last()
+	if msg.To != "pending@example.com" {
+		t.Fatalf("send-code email To = %q", msg.To)
+	}
+	code := extractRegistrationCode(t, msg.HTMLBody+msg.TextBody)
+
+	// Wrong code path: should fail, leave account unborn.
+	wrong := postJSON("/cloud-terminal-api/accounts/register", `{"username":"pending@example.com","password":"TestPassword1","email":"pending@example.com","code":"000000"}`)
+	if wrong.Code != http.StatusBadRequest {
+		t.Fatalf("wrong code expected 400, got %d body=%s", wrong.Code, wrong.Body.String())
+	}
+	if _, err := server.accountStore().Login("pending@example.com", "TestPassword1"); err == nil {
+		t.Fatal("expected login to fail after wrong-code register attempt")
+	}
+
+	// Correct code path: account is created + auto-logged-in (cookies set).
+	ok := postJSON("/cloud-terminal-api/accounts/register", `{"username":"pending@example.com","password":"TestPassword1","email":"pending@example.com","code":"`+code+`"}`)
+	if ok.Code != http.StatusOK {
+		t.Fatalf("register OK status = %d body = %s", ok.Code, ok.Body.String())
+	}
+	if cookies := ok.Result().Cookies(); len(cookies) == 0 {
+		t.Fatal("expected session cookies on successful register")
+	}
+	if _, err := server.accountStore().Login("pending@example.com", "TestPassword1"); err != nil {
+		t.Fatalf("expected post-register login to succeed: %v", err)
+	}
+	rec, _ := server.accountStore().AccountRecord("pending@example.com")
+	if !rec.EmailVerified {
+		t.Fatal("expected email_verified=true after code-based register")
+	}
+
+	// Reusing the same code should now fail (one-shot).
+	replay := postJSON("/cloud-terminal-api/accounts/register", `{"username":"other@example.com","password":"TestPassword1","email":"other@example.com","code":"`+code+`"}`)
+	if replay.Code != http.StatusBadRequest {
+		t.Fatalf("replay expected 400, got %d body=%s", replay.Code, replay.Body.String())
+	}
+}
+
+type capturingMailSender struct {
+	mu   sync.Mutex
+	msgs []mail.Message
+}
+
+func (c *capturingMailSender) Send(_ context.Context, msg mail.Message) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.msgs = append(c.msgs, msg)
+	return nil
+}
+
+func (c *capturingMailSender) Kind() string { return "test-capture" }
+
+func (c *capturingMailSender) Last() mail.Message {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.msgs) == 0 {
+		return mail.Message{}
+	}
+	return c.msgs[len(c.msgs)-1]
+}
+
+func extractRegistrationCode(t *testing.T, body string) string {
+	t.Helper()
+	re := regexp.MustCompile(`\b\d{6}\b`)
+	match := re.FindString(body)
+	if match == "" {
+		t.Fatalf("6-digit code not found in mail body:\n%s", body)
+	}
+	return match
+}
+
+// Regression: session cookies must be SameSite=Lax so they survive the
+// cross-site → same-site redirect chain that OAuth (Google) walks through.
+// Strict would cause the browser to drop the cookie on the redirect to /user/
+// and bounce the user back to the login screen.
+func TestSessionCookiesAreSameSiteLax(t *testing.T) {
+	t.Parallel()
+
+	server := testServer(t, config.Config{
+		Server: config.ServerConfig{
+			AccountStorePath:           filepath.Join(t.TempDir(), "accounts.json"),
+			AccountRegistrationEnabled: testBoolPtr(true),
+		},
+		Policy: minimalPolicy(),
+	})
+	handler := server.Routes()
+	cookies := registerTestAccount(t, server, "lax@example.com", "TestPassword1")
+	if len(cookies) == 0 {
+		t.Fatal("expected cookies from registerTestAccount")
+	}
+	for _, cookie := range cookies {
+		switch cookie.Name {
+		case accountCookieName, workbenchCookieName:
+			if cookie.SameSite != http.SameSiteLaxMode {
+				t.Fatalf("cookie %s SameSite = %v, want Lax", cookie.Name, cookie.SameSite)
+			}
+		}
+	}
+
+	loginReq := httptest.NewRequest(http.MethodPost, "/cloud-terminal-api/accounts/login", bytes.NewBufferString(`{"username":"lax@example.com","password":"TestPassword1"}`))
+	loginReq.Header.Set("Content-Type", "application/json")
+	loginResp := httptest.NewRecorder()
+	handler.ServeHTTP(loginResp, loginReq)
+	if loginResp.Code != http.StatusOK {
+		t.Fatalf("login status = %d", loginResp.Code)
+	}
+	for _, cookie := range loginResp.Result().Cookies() {
+		switch cookie.Name {
+		case accountCookieName, workbenchCookieName:
+			if cookie.SameSite != http.SameSiteLaxMode {
+				t.Fatalf("login cookie %s SameSite = %v, want Lax", cookie.Name, cookie.SameSite)
+			}
+		}
+	}
+}
+
+func TestAdminCanDisableAndResetAccount(t *testing.T) {
+	t.Parallel()
+
+	server := testServer(t, config.Config{
+		Server: config.ServerConfig{
+			AdminUsername:              "admin",
+			AdminPassword:              "admin123456",
+			AccountStorePath:           filepath.Join(t.TempDir(), "accounts.json"),
+			AccountRegistrationEnabled: testBoolPtr(true),
+		},
+		Policy: minimalPolicy(),
+	})
+	handler := server.Routes()
+
+	adminCookies := loginTestAccount(t, server, "admin", "admin123456")
+	createBody := bytes.NewBufferString(`{"username":"managed@example.com","password":"TestPassword1","role":"user"}`)
+	createReq := httptest.NewRequest(http.MethodPost, "/cloud-terminal-api/admin/accounts", createBody)
+	createReq.Header.Set("Content-Type", "application/json")
+	for _, cookie := range adminCookies {
+		createReq.AddCookie(cookie)
+	}
+	createResp := httptest.NewRecorder()
+	handler.ServeHTTP(createResp, createReq)
+	if createResp.Code != http.StatusCreated {
+		t.Fatalf("create account status = %d body = %s", createResp.Code, createResp.Body.String())
+	}
+
+	manage := func(payload string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/cloud-terminal-api/admin/accounts/manage", bytes.NewBufferString(payload))
+		req.Header.Set("Content-Type", "application/json")
+		for _, cookie := range adminCookies {
+			req.AddCookie(cookie)
+		}
+		resp := httptest.NewRecorder()
+		handler.ServeHTTP(resp, req)
+		return resp
+	}
+
+	resp := manage(`{"action":"disable","username":"managed@example.com"}`)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("disable status = %d body = %s", resp.Code, resp.Body.String())
+	}
+	if _, err := server.accountStore().Login("managed@example.com", "TestPassword1"); err == nil {
+		t.Fatal("expected disabled account login to fail")
+	}
+
+	resp = manage(`{"action":"enable","username":"managed@example.com"}`)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("enable status = %d body = %s", resp.Code, resp.Body.String())
+	}
+	if _, err := server.accountStore().Login("managed@example.com", "TestPassword1"); err != nil {
+		t.Fatalf("expected enabled account to log in: %v", err)
+	}
+
+	resp = manage(`{"action":"reset_password","username":"managed@example.com","password":"RotatedPass1"}`)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("reset status = %d body = %s", resp.Code, resp.Body.String())
+	}
+	if !server.accountStore().VerifyPassword("managed@example.com", "RotatedPass1") {
+		t.Fatal("expected rotated password to verify")
+	}
+
+	resp = manage(`{"action":"disable","username":"admin"}`)
+	if resp.Code != http.StatusBadRequest {
+		t.Fatalf("self-disable status = %d body = %s", resp.Code, resp.Body.String())
+	}
+}
+
 func TestUserAccountCannotAccessAdmin(t *testing.T) {
 	t.Parallel()
 
@@ -350,7 +665,7 @@ func TestUserAccountCannotAccessAdmin(t *testing.T) {
 		Policy: minimalPolicy(),
 	})
 	handler := server.Routes()
-	userCookies := registerTestAccount(t, server, "user@example.com", "secret123")
+	userCookies := registerTestAccount(t, server, "user@example.com", "TestPassword1")
 
 	req := httptest.NewRequest(http.MethodGet, "/cloud-terminal-api/admin/accounts", nil)
 	for _, cookie := range userCookies {
@@ -387,7 +702,7 @@ func TestUserStaticRequiresAccountButNotAdmin(t *testing.T) {
 		t.Fatalf("anonymous user console status = %d, want 302", resp.Code)
 	}
 
-	cookies := registerTestAccount(t, server, "user@example.com", "secret123")
+	cookies := registerTestAccount(t, server, "user@example.com", "TestPassword1")
 	req = httptest.NewRequest(http.MethodGet, "/user/", nil)
 	for _, cookie := range cookies {
 		req.AddCookie(cookie)
@@ -399,6 +714,197 @@ func TestUserStaticRequiresAccountButNotAdmin(t *testing.T) {
 	}
 	if resp.Body.String() != "user" {
 		t.Fatalf("user console body = %q", resp.Body.String())
+	}
+}
+
+func TestUserStaticRedirectKeepsForwardedPrefix(t *testing.T) {
+	t.Parallel()
+
+	server := NewServer(Options{
+		Config: config.NewStore(t.TempDir()+"/policy.yaml", &config.Config{
+			Server: config.ServerConfig{AccountRegistrationEnabled: testBoolPtr(true)},
+			Policy: minimalPolicy(),
+		}),
+		StaticFS: fstest.MapFS{
+			"user/index.html": &fstest.MapFile{Data: []byte("user")},
+			"user/login.html": &fstest.MapFile{Data: []byte("login")},
+		},
+	})
+	handler := server.Routes()
+
+	req := httptest.NewRequest(http.MethodGet, "/user/", nil)
+	req.Header.Set("X-Forwarded-Prefix", "/xmux")
+	resp := httptest.NewRecorder()
+	handler.ServeHTTP(resp, req)
+	if resp.Code != http.StatusFound {
+		t.Fatalf("anonymous user console status = %d, want 302", resp.Code)
+	}
+	if got := resp.Header().Get("Location"); got != "/xmux/user/login.html" {
+		t.Fatalf("anonymous user console Location = %q, want /xmux/user/login.html", got)
+	}
+}
+
+func TestOAuthErrorRedirectKeepsExternalPrefix(t *testing.T) {
+	t.Parallel()
+
+	server := NewServer(Options{
+		Config: config.NewStore(t.TempDir()+"/policy.yaml", &config.Config{
+			Server: config.ServerConfig{AccountRegistrationEnabled: testBoolPtr(true)},
+			Policy: minimalPolicy(),
+		}),
+		StaticFS: fstest.MapFS{
+			"user/login.html": &fstest.MapFile{Data: []byte("login")},
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/cloud-terminal-api/accounts/oauth/google/callback", nil)
+	req.Header.Set("X-Forwarded-Prefix", "/xmux")
+	resp := httptest.NewRecorder()
+	server.redirectOAuthError(resp, req, "token_exchange_failed")
+
+	if resp.Code != http.StatusFound {
+		t.Fatalf("oauth error status = %d, want 302", resp.Code)
+	}
+	want := "/xmux/user/login.html?oauth_error=token_exchange_failed"
+	if got := resp.Header().Get("Location"); got != want {
+		t.Fatalf("oauth error Location = %q, want %q", got, want)
+	}
+}
+
+func TestOAuthStartAcceptsExternalPrefixWhenProxyDoesNotStrip(t *testing.T) {
+	t.Parallel()
+
+	server := NewServer(Options{
+		Config: config.NewStore(t.TempDir()+"/policy.yaml", &config.Config{
+			Server: config.ServerConfig{AccountRegistrationEnabled: testBoolPtr(true)},
+			Policy: minimalPolicy(),
+		}),
+		StaticFS: fstest.MapFS{
+			"user/login.html": &fstest.MapFile{Data: []byte("login")},
+		},
+	})
+	if server.appSettings == nil {
+		t.Fatal("expected app settings")
+	}
+	if err := server.appSettings.Set(appSettingKeyOAuthGoogle, oauthGoogleSettings{
+		Enabled:     true,
+		ClientID:    "client-id",
+		RedirectURL: "https://ops.example.com/xmux/cloud-terminal-api/accounts/oauth/google/callback",
+	}, "test-suite"); err != nil {
+		t.Fatalf("set oauth settings: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/xmux/cloud-terminal-api/accounts/oauth/google/start?return_to=%2Fxmux%2Fuser%2F", nil)
+	resp := httptest.NewRecorder()
+	server.Routes().ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusFound {
+		t.Fatalf("oauth start status = %d body = %s", resp.Code, resp.Body.String())
+	}
+	location := resp.Header().Get("Location")
+	if !strings.HasPrefix(location, googleAuthURL+"?") {
+		t.Fatalf("oauth start Location = %q, want google auth URL", location)
+	}
+	for _, cookie := range resp.Result().Cookies() {
+		if cookie.Name == oauthReturnToCookie && cookie.Value != "/xmux/user/" {
+			t.Fatalf("return_to cookie = %q, want /xmux/user/", cookie.Value)
+		}
+	}
+}
+
+func TestExternalPathPrefixCanComeFromAppBaseURL(t *testing.T) {
+	t.Parallel()
+
+	server := NewServer(Options{
+		Config: config.NewStore(t.TempDir()+"/policy.yaml", &config.Config{
+			Server: config.ServerConfig{AccountRegistrationEnabled: testBoolPtr(true)},
+			Policy: minimalPolicy(),
+		}),
+		StaticFS: fstest.MapFS{
+			"user/login.html": &fstest.MapFile{Data: []byte("login")},
+		},
+	})
+	if server.appSettings == nil {
+		t.Fatal("expected app settings")
+	}
+	if err := server.appSettings.Set(appSettingKeyAppBaseURL, "https://ops.example.com/xmux/", "test-suite"); err != nil {
+		t.Fatalf("set app base URL: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/user/", nil)
+	resp := httptest.NewRecorder()
+	server.redirectExternal(resp, req, "/user/login.html", http.StatusFound)
+
+	if resp.Code != http.StatusFound {
+		t.Fatalf("redirect status = %d, want 302", resp.Code)
+	}
+	if got := resp.Header().Get("Location"); got != "/xmux/user/login.html" {
+		t.Fatalf("redirect Location = %q, want /xmux/user/login.html", got)
+	}
+}
+
+func TestExternalPathPrefixCanComeFromOAuthRedirectURL(t *testing.T) {
+	t.Parallel()
+
+	server := NewServer(Options{
+		Config: config.NewStore(t.TempDir()+"/policy.yaml", &config.Config{
+			Server: config.ServerConfig{AccountRegistrationEnabled: testBoolPtr(true)},
+			Policy: minimalPolicy(),
+		}),
+		StaticFS: fstest.MapFS{
+			"user/login.html": &fstest.MapFile{Data: []byte("login")},
+		},
+	})
+	if server.appSettings == nil {
+		t.Fatal("expected app settings")
+	}
+	if err := server.appSettings.Set(appSettingKeyOAuthGoogle, oauthGoogleSettings{
+		Enabled:     true,
+		ClientID:    "client-id",
+		RedirectURL: "https://ops.example.com/xmux/cloud-terminal-api/accounts/oauth/google/callback",
+	}, "test-suite"); err != nil {
+		t.Fatalf("set oauth settings: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/cloud-terminal-api/accounts/oauth/google/callback", nil)
+	resp := httptest.NewRecorder()
+	server.redirectOAuthError(resp, req, "token_exchange_failed")
+
+	if resp.Code != http.StatusFound {
+		t.Fatalf("oauth error status = %d, want 302", resp.Code)
+	}
+	want := "/xmux/user/login.html?oauth_error=token_exchange_failed"
+	if got := resp.Header().Get("Location"); got != want {
+		t.Fatalf("oauth error Location = %q, want %q", got, want)
+	}
+}
+
+func TestDiscoveryGatewayIncludesForwardedPrefix(t *testing.T) {
+	t.Parallel()
+
+	server := NewServer(Options{
+		Config:   config.NewStore(t.TempDir()+"/policy.yaml", &config.Config{Server: config.ServerConfig{}, Policy: minimalPolicy()}),
+		StaticFS: fstest.MapFS{"index.html": &fstest.MapFile{Data: []byte("root")}},
+	})
+	handler := server.Routes()
+
+	req := httptest.NewRequest(http.MethodGet, "/cloud-terminal-api/discovery/gateway", nil)
+	req.Host = "internal.local"
+	req.Header.Set("X-Forwarded-Proto", "https")
+	req.Header.Set("X-Forwarded-Host", "ops.example.com")
+	req.Header.Set("X-Forwarded-Prefix", "/xmux")
+	resp := httptest.NewRecorder()
+	handler.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("discovery status = %d body = %s", resp.Code, resp.Body.String())
+	}
+	var payload map[string]string
+	if err := json.Unmarshal(resp.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode discovery response: %v", err)
+	}
+	if got := payload["gateway_url"]; got != "https://ops.example.com/xmux" {
+		t.Fatalf("gateway_url = %q, want https://ops.example.com/xmux", got)
 	}
 }
 
@@ -480,7 +986,7 @@ func TestUserDoesNotReuseAdminConfiguredTunnel(t *testing.T) {
 		exitWaiters:  make(map[string]chan workbenchServerMessage),
 	})
 
-	userCookies := registerTestAccount(t, server, "user@example.com", "secret123")
+	userCookies := registerTestAccount(t, server, "user@example.com", "TestPassword1")
 	req := httptest.NewRequest(http.MethodGet, "/cloud-terminal-api/workbench/state", nil)
 	for _, cookie := range userCookies {
 		req.AddCookie(cookie)
@@ -524,7 +1030,7 @@ func TestUserSettingsPersistAndConstrainPolicy(t *testing.T) {
 		},
 	})
 	handler := server.Routes()
-	userCookies := registerTestAccount(t, server, "user@example.com", "secret123")
+	userCookies := registerTestAccount(t, server, "user@example.com", "TestPassword1")
 
 	getReq := httptest.NewRequest(http.MethodGet, "/cloud-terminal-api/user/settings", nil)
 	for _, cookie := range userCookies {
@@ -609,6 +1115,97 @@ func TestUserSettingsPersistAndConstrainPolicy(t *testing.T) {
 	}
 }
 
+func TestUserArchiveSyncFiltersWorkbenchState(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	project := filepath.Join(root, "project")
+	other := filepath.Join(root, "other")
+	if err := os.MkdirAll(project, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(other, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	server := testServer(t, config.Config{
+		Server: config.ServerConfig{AccountRegistrationEnabled: testBoolPtr(true)},
+		Policy: policy.Config{
+			AllowPaths: []string{root},
+			Commands:   map[string]policy.CommandPolicy{"pwd": {Enabled: true}},
+		},
+	})
+	cookies := registerTestAccount(t, server, "user@example.com", "TestPassword1")
+	if _, err := server.accountStore().SaveUserSettings("user@example.com", userSettingsUpdatePayload{
+		AllowPaths: []string{root},
+		Commands:   map[string]adminCommandPayload{"pwd": {Enabled: true}},
+	}, server.config.Snapshot().Policy); err != nil {
+		t.Fatalf("save user settings: %v", err)
+	}
+	server.workbench.sessions["session-archived"] = &workbenchSession{
+		id:          "session-archived",
+		account:     "user@example.com",
+		agent:       "codex",
+		workDir:     project,
+		startedAt:   time.Now(),
+		lastActive:  time.Now(),
+		submitted:   true,
+		title:       "archived task",
+		attachments: map[uint64]func(workbenchServerMessage){},
+	}
+	server.workbench.sessions["session-visible"] = &workbenchSession{
+		id:          "session-visible",
+		account:     "user@example.com",
+		agent:       "codex",
+		workDir:     other,
+		startedAt:   time.Now(),
+		lastActive:  time.Now(),
+		submitted:   true,
+		title:       "visible task",
+		attachments: map[uint64]func(workbenchServerMessage){},
+	}
+
+	body, err := json.Marshal(userArchiveUpdatePayload{
+		ArchivedFolders:  []string{project},
+		ArchivedSessions: []string{"session-archived"},
+	})
+	if err != nil {
+		t.Fatalf("marshal archive update: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPut, "/cloud-terminal-api/user/archive", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	for _, cookie := range cookies {
+		req.AddCookie(cookie)
+	}
+	resp := httptest.NewRecorder()
+	server.Routes().ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("archive status = %d body = %s", resp.Code, resp.Body.String())
+	}
+
+	stateReq := httptest.NewRequest(http.MethodGet, "/cloud-terminal-api/workbench/state", nil)
+	for _, cookie := range cookies {
+		stateReq.AddCookie(cookie)
+	}
+	stateResp := httptest.NewRecorder()
+	server.Routes().ServeHTTP(stateResp, stateReq)
+	if stateResp.Code != http.StatusOK {
+		t.Fatalf("state status = %d body = %s", stateResp.Code, stateResp.Body.String())
+	}
+	var state workbenchStatePayload
+	if err := json.NewDecoder(stateResp.Body).Decode(&state); err != nil {
+		t.Fatalf("decode state: %v", err)
+	}
+	if len(state.Sessions) != 1 || state.Sessions[0].ID != "session-visible" {
+		t.Fatalf("visible sessions = %+v, want only session-visible", state.Sessions)
+	}
+	if len(state.ArchivedFolders) != 1 || state.ArchivedFolders[0] != project {
+		t.Fatalf("archived folders = %+v, want %s", state.ArchivedFolders, project)
+	}
+	if len(state.ArchivedSessionItems) != 1 || state.ArchivedSessionItems[0].ID != "session-archived" {
+		t.Fatalf("archived session items = %+v, want session-archived", state.ArchivedSessionItems)
+	}
+}
+
 func TestWorkbenchStateFiltersSessionsOutsideAccountAllowPath(t *testing.T) {
 	t.Parallel()
 
@@ -629,7 +1226,7 @@ func TestWorkbenchStateFiltersSessionsOutsideAccountAllowPath(t *testing.T) {
 			Commands:   map[string]policy.CommandPolicy{"pwd": {Enabled: true}},
 		},
 	})
-	cookies := registerTestAccount(t, server, "user@example.com", "secret123")
+	cookies := registerTestAccount(t, server, "user@example.com", "TestPassword1")
 	if _, err := server.accountStore().SaveUserSettings("user@example.com", userSettingsUpdatePayload{
 		AllowPaths: []string{accountWorkDir},
 		Commands:   map[string]adminCommandPayload{"pwd": {Enabled: true}},
@@ -643,6 +1240,7 @@ func TestWorkbenchStateFiltersSessionsOutsideAccountAllowPath(t *testing.T) {
 		workDir:     globalWorkDir,
 		startedAt:   time.Now(),
 		lastActive:  time.Now(),
+		submitted:   true,
 		attachments: map[uint64]func(workbenchServerMessage){},
 	}
 	server.workbench.sessions["inside"] = &workbenchSession{
@@ -652,6 +1250,7 @@ func TestWorkbenchStateFiltersSessionsOutsideAccountAllowPath(t *testing.T) {
 		workDir:     accountWorkDir,
 		startedAt:   time.Now(),
 		lastActive:  time.Now().Add(time.Second),
+		submitted:   true,
 		attachments: map[uint64]func(workbenchServerMessage){},
 	}
 
@@ -693,7 +1292,7 @@ func TestTerminalWSDefaultsToAccountAllowPath(t *testing.T) {
 			Commands:   map[string]policy.CommandPolicy{"pwd": {Enabled: true}},
 		},
 	})
-	cookies := registerTestAccount(t, server, "user@example.com", "secret123")
+	cookies := registerTestAccount(t, server, "user@example.com", "TestPassword1")
 	if _, err := server.accountStore().SaveUserSettings("user@example.com", userSettingsUpdatePayload{
 		AllowPaths: []string{accountWorkDir},
 		Commands:   map[string]adminCommandPayload{"pwd": {Enabled: true}},
@@ -743,7 +1342,7 @@ func TestUserFSOnlyListsAccountAllowedRoots(t *testing.T) {
 		},
 	})
 	handler := server.Routes()
-	cookies := registerTestAccount(t, server, "user@example.com", "secret123")
+	cookies := registerTestAccount(t, server, "user@example.com", "TestPassword1")
 
 	req := httptest.NewRequest(http.MethodGet, "/cloud-terminal-api/user/fs", nil)
 	for _, cookie := range cookies {
@@ -932,7 +1531,7 @@ func TestLegacyAccountsMigrateToSQLiteOnce(t *testing.T) {
 	dir := t.TempDir()
 	legacyPath := filepath.Join(dir, "accounts.json")
 	dbPath := filepath.Join(dir, "xmux.db")
-	hash, err := hashPassword("secret123")
+	hash, err := hashPassword("TestPassword1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -967,7 +1566,7 @@ func TestLegacyAccountsMigrateToSQLiteOnce(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new account store: %v", err)
 	}
-	if !store.VerifyPassword("legacy@example.com", "secret123") {
+	if !store.VerifyPassword("legacy@example.com", "TestPassword1") {
 		t.Fatal("expected migrated legacy account to verify")
 	}
 	if !store.VerifySession("legacy-session", "legacy@example.com") {
@@ -1116,6 +1715,15 @@ func loginTestAccount(t *testing.T, server *Server, username string, password st
 
 func registerTestAccount(t *testing.T, server *Server, username string, password string) []*http.Cookie {
 	t.Helper()
+	if server != nil && server.appSettings != nil {
+		// Tests stay on the pre-Stage 2 flow (no email required, no verify gate)
+		// so the suite doesn't need to mock SMTP. Production deployments still
+		// see the strict defaults from defaultAuthSettings().
+		_ = server.appSettings.Set(appSettingKeyAuthSettings, authSettings{
+			RequireEmailOnRegister:      false,
+			RequireEmailVerifiedToLogin: false,
+		}, "test-suite")
+	}
 	handler := server.Routes()
 	body, err := json.Marshal(accountAuthPayload{Username: username, Password: password})
 	if err != nil {

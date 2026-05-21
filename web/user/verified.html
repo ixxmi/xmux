@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>邮箱验证 - xmux</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="login-shell">
+      <div class="login-box">
+        <div class="login-mark">xm</div>
+        <h1>邮箱验证</h1>
+        <p id="verifyMessage" class="login-message"></p>
+        <div class="login-actions">
+          <a class="link-button" href="login.html">返回登录</a>
+        </div>
+      </div>
+    </main>
+    <script>
+      const params = new URLSearchParams(window.location.search);
+      const status = params.get("status");
+      const message = document.getElementById("verifyMessage");
+      if (status === "ok") {
+        message.textContent = "邮箱验证成功，可以登录了。";
+        message.classList.add("ok");
+      } else {
+        message.textContent = "验证链接无效或已过期，请重新发送验证邮件。";
+        message.classList.add("error");
+      }
+    </script>
+  </body>
+</html>

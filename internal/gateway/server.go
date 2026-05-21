@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	pathpkg "path"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -19,6 +20,7 @@ import (
 
 	"cloud-terminal/internal/config"
 	"cloud-terminal/internal/edge"
+	"cloud-terminal/internal/mail"
 	"cloud-terminal/internal/policy"
 
 	"github.com/gorilla/websocket"
@@ -65,6 +67,10 @@ type Server struct {
 	config            *config.Store
 	accountMu         sync.RWMutex
 	accounts          *accountStore
+	appSettings       *appSettingsStore
+	secrets           *secretKeeper
+	mailer            *mail.Reloader
+	buckets           *rateBuckets
 	edgeID            string
 	edgeName          string
 	logger            *slog.Logger
@@ -107,6 +113,7 @@ func NewServer(opts Options) *Server {
 	tunnelHub := newTunnelHub(opts.Logger)
 	tunnelHub.setConfigStore(opts.Config)
 	tunnelHub.setDefaultAccount(cfg.CloudTunnel.Account)
+	tunnelHub.setGraceDuration(cfg.CloudTunnel.ReconnectGrace.Duration)
 	runtime := opts.Runtime
 	if runtime == nil {
 		runtime = newTunnelRuntime(tunnelHub)
@@ -127,9 +134,28 @@ func NewServer(opts Options) *Server {
 		tunnel:            tunnelHub,
 		agentPolicyUpdate: opts.AgentPolicyUpdate,
 	}
+	if accounts != nil {
+		dataDir := filepath.Dir(opts.Config.DatabasePath())
+		if strings.TrimSpace(dataDir) == "" {
+			dataDir = "data"
+		}
+		server.secrets = newSecretKeeper(dataDir)
+		if appSettings, err := newAppSettingsStore(accounts.db); err != nil {
+			opts.Logger.Warn("init app settings", "error", err)
+		} else {
+			server.appSettings = appSettings
+			accounts.SetPasswordPolicyResolver(appSettings.PasswordPolicy)
+		}
+		server.mailer = mail.NewReloader(&mail.LogSender{Logger: opts.Logger})
+		server.reloadMailerLocked()
+		server.buckets = newRateBuckets()
+	}
 	server.workbench = newWorkbenchManager(runtime, opts.Config, opts.EdgeID, opts.EdgeName, opts.WorkbenchStatePath, opts.Logger)
 	server.workbench.policyResolver = accounts
 	tunnelHub.setSessionSink(server.handleTunnelSessionMessage)
+	if opts.Logger != nil {
+		opts.Logger.Warn("[OAUTH-DIAG] xmux gateway initialized with session cookies SameSite=Lax + diagnostic logs")
+	}
 	return server
 }
 
@@ -144,7 +170,18 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("/cloud-terminal-api/accounts/logout", s.accountLogout)
 	mux.HandleFunc("/cloud-terminal-api/accounts/me", s.accountMe)
 	mux.HandleFunc("/cloud-terminal-api/accounts/tunnel-session", s.accountTunnelSession)
+	mux.HandleFunc("/cloud-terminal-api/accounts/verify-email", s.accountVerifyEmail)
+	mux.HandleFunc("/cloud-terminal-api/accounts/register/send-code", s.accountRegisterSendCode)
+	mux.HandleFunc("/cloud-terminal-api/accounts/resend-verify", s.accountResendVerify)
+	mux.HandleFunc("/cloud-terminal-api/accounts/set-email", s.accountSetEmail)
+	mux.HandleFunc("/cloud-terminal-api/accounts/forgot-password", s.accountForgotPassword)
+	mux.HandleFunc("/cloud-terminal-api/accounts/reset-password", s.accountResetPassword)
+	mux.HandleFunc("/cloud-terminal-api/accounts/oauth/google/start", s.oauthGoogleStart)
+	mux.HandleFunc("/cloud-terminal-api/accounts/oauth/google/callback", s.oauthGoogleCallback)
+	mux.HandleFunc("/cloud-terminal-api/accounts/oauth/google/bind", s.oauthGoogleBind)
 	mux.HandleFunc("/cloud-terminal-api/user/settings", s.withAccount(s.userSettings))
+	mux.HandleFunc("/cloud-terminal-api/user/archive", s.withAccount(s.userArchive))
+	mux.HandleFunc("/cloud-terminal-api/user/quick-commands", s.withAccount(s.userQuickCommands))
 	mux.HandleFunc("/cloud-terminal-api/user/fs", s.withAccount(s.userFS))
 	mux.HandleFunc("/cloud-terminal-api/workbench/auth", s.workbenchAuth)
 	mux.HandleFunc("/cloud-terminal-api/workbench/logout", s.workbenchLogout)
@@ -156,29 +193,258 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("/cloud-terminal-api/workbench/preview", s.withWorkbench(s.workbenchPreview))
 	mux.HandleFunc("/preview/", s.withWorkbench(s.workbenchPreviewPath))
 	mux.HandleFunc("/cloud-terminal-api/admin/config", s.withAdmin(s.adminConfig))
+	mux.HandleFunc("/cloud-terminal-api/admin/auth-settings", s.withAdmin(s.adminAuthSettings))
+	mux.HandleFunc("/cloud-terminal-api/admin/smtp-settings", s.withAdmin(s.adminSMTPSettings))
+	mux.HandleFunc("/cloud-terminal-api/admin/smtp-settings/test", s.withAdmin(s.adminSMTPTest))
+	mux.HandleFunc("/cloud-terminal-api/admin/oauth-settings/google", s.withAdmin(s.adminOAuthGoogleSettings))
+	mux.HandleFunc("/cloud-terminal-api/auth/public-config", s.authPublicConfig)
 	mux.HandleFunc("/cloud-terminal-api/admin/accounts", s.withAdmin(s.adminAccounts))
+	mux.HandleFunc("/cloud-terminal-api/admin/accounts/manage", s.withAdmin(s.adminAccountManage))
 	mux.HandleFunc("/cloud-terminal-api/admin/fs", s.withAdmin(s.adminFS))
 	mux.HandleFunc("/cloud-terminal-api/ws/terminal", s.terminalWS)
 	mux.HandleFunc("/cloud-terminal-api/ws/workbench", s.workbenchWS)
 	mux.HandleFunc("/cloud-terminal-api/tunnel/agent", s.tunnelAgentWS)
-	if adminFS, err := fs.Sub(s.staticFS, "admin"); err == nil {
-		adminFiles := http.StripPrefix("/admin/", http.FileServer(http.FS(adminFS)))
-		mux.Handle("/admin/", s.withAdminStatic(adminFiles))
-	}
-	if userFS, err := fs.Sub(s.staticFS, "user"); err == nil {
-		userFiles := http.StripPrefix("/user/", http.FileServer(http.FS(userFS)))
-		mux.Handle("/user/", s.withUserStatic(userFiles))
-	}
+	s.mountStaticDir(mux, "/admin/", "admin", s.withAdminStatic)
+	s.mountStaticDir(mux, "/user/", "user", s.withUserStatic)
+	s.mountStaticDir(mux, "/mobile/", "mobile", nil)
+	s.mountStaticDir(mux, "/chat/", "chat", nil)
+	s.mountStaticDir(mux, "/agent/", "agent", nil)
+	s.mountStaticDir(mux, "/shared/", "shared", nil)
+	s.mountStaticDir(mux, "/vendor/", "vendor", nil)
+	s.mountStaticFile(mux, "/index.html")
+	s.mountStaticFile(mux, "/app.js")
+	s.mountStaticFile(mux, "/styles.css")
+	s.mountPageRedirect(mux, "/admin", "/admin/")
+	s.mountPageRedirect(mux, "/user", "/user/")
+	s.mountPageRedirect(mux, "/mobile", "/mobile/")
+	s.mountPageRedirect(mux, "/chat", "/chat/")
+	s.mountPageRedirect(mux, "/agent", "/agent/")
 	mux.HandleFunc("/", s.serveRoot)
-	return s.securityHeaders(mux)
+	return s.securityHeaders(s.stripExternalPrefix(mux))
+}
+
+func (s *Server) mountStaticDir(mux *http.ServeMux, prefix, dir string, wrap func(http.Handler) http.Handler) {
+	sub, err := fs.Sub(s.staticFS, dir)
+	if err != nil {
+		return
+	}
+	handler := http.StripPrefix(prefix, http.FileServer(http.FS(sub)))
+	if wrap != nil {
+		handler = wrap(handler)
+	}
+	mux.Handle(prefix, handler)
+}
+
+func (s *Server) mountStaticFile(mux *http.ServeMux, path string) {
+	mux.HandleFunc(path, func(w http.ResponseWriter, r *http.Request) {
+		http.FileServer(http.FS(s.staticFS)).ServeHTTP(w, r)
+	})
+}
+
+func (s *Server) mountPageRedirect(mux *http.ServeMux, from, to string) {
+	mux.HandleFunc(from, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != from {
+			http.NotFound(w, r)
+			return
+		}
+		s.redirectExternal(w, r, to, http.StatusMovedPermanently)
+	})
+}
+
+func (s *Server) stripExternalPrefix(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		prefix := forwardedPathPrefix(r)
+		if prefix == "" && r != nil && r.URL != nil {
+			prefix = prefixBeforeKnownRoute(r.URL.EscapedPath())
+			if prefix == "" {
+				prefix = prefixBeforeKnownRoute(r.URL.Path)
+			}
+		}
+		if prefix == "" || r == nil || r.URL == nil || !pathHasPrefix(r.URL.Path, prefix) {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		clone := r.Clone(r.Context())
+		cloneURL := *r.URL
+		cloneURL.Path = strings.TrimPrefix(r.URL.Path, prefix)
+		if cloneURL.Path == "" {
+			cloneURL.Path = "/"
+		}
+		if r.URL.RawPath != "" && pathHasPrefix(r.URL.RawPath, prefix) {
+			cloneURL.RawPath = strings.TrimPrefix(r.URL.RawPath, prefix)
+			if cloneURL.RawPath == "" {
+				cloneURL.RawPath = "/"
+			}
+		}
+		clone.URL = &cloneURL
+		if firstHeaderValue(clone.Header.Get("X-Forwarded-Prefix")) == "" {
+			clone.Header = clone.Header.Clone()
+			clone.Header.Set("X-Forwarded-Prefix", prefix)
+		}
+		next.ServeHTTP(w, clone)
+	})
+}
+
+func pathHasPrefix(path, prefix string) bool {
+	if prefix == "" || prefix == "/" {
+		return false
+	}
+	return path == prefix || strings.HasPrefix(path, prefix+"/")
+}
+
+func (s *Server) redirectExternal(w http.ResponseWriter, r *http.Request, target string, code int) {
+	http.Redirect(w, r, s.externalPath(r, target), code)
+}
+
+func (s *Server) externalPath(r *http.Request, target string) string {
+	if target == "" {
+		target = "/"
+	}
+	if !strings.HasPrefix(target, "/") {
+		target = "/" + target
+	}
+	if strings.HasPrefix(target, "//") || strings.HasPrefix(target, "/\\") {
+		target = "/"
+	}
+	if s == nil || r == nil {
+		return target
+	}
+	prefix := s.externalPathPrefix(r)
+	if prefix == "" {
+		return target
+	}
+	if target == prefix || strings.HasPrefix(target, prefix+"/") {
+		return target
+	}
+	return joinURLPath(prefix, target)
+}
+
+func (s *Server) externalPathPrefix(r *http.Request) string {
+	if prefix := forwardedPathPrefix(r); prefix != "" {
+		return prefix
+	}
+	base := s.appBaseURL(r)
+	if base == "" {
+		return ""
+	}
+	u, err := url.Parse(base)
+	if err != nil {
+		return ""
+	}
+	if prefix := cleanExternalPrefix(u.EscapedPath()); prefix != "" {
+		return prefix
+	}
+	if s.appSettings != nil {
+		cfg := s.appSettings.OAuthGoogleSettings()
+		if cfg.RedirectURL != "" {
+			if u, err := url.Parse(cfg.RedirectURL); err == nil {
+				return prefixBeforeKnownRoute(u.EscapedPath())
+			}
+		}
+	}
+	return ""
+}
+
+func forwardedPathPrefix(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	for _, header := range []string{"X-Forwarded-Prefix", "X-Script-Name"} {
+		if value := firstHeaderValue(r.Header.Get(header)); value != "" {
+			return cleanExternalPrefix(value)
+		}
+	}
+	if uri := firstHeaderValue(r.Header.Get("X-Forwarded-Uri")); uri != "" {
+		if u, err := url.ParseRequestURI(uri); err == nil {
+			return prefixBeforeKnownRoute(u.EscapedPath())
+		}
+		return prefixBeforeKnownRoute(uri)
+	}
+	if uri := firstHeaderValue(r.Header.Get("X-Original-URI")); uri != "" {
+		if u, err := url.ParseRequestURI(uri); err == nil {
+			return prefixBeforeKnownRoute(u.EscapedPath())
+		}
+		return prefixBeforeKnownRoute(uri)
+	}
+	return ""
+}
+
+func firstHeaderValue(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	return strings.TrimSpace(strings.SplitN(value, ",", 2)[0])
+}
+
+func prefixBeforeKnownRoute(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" || !strings.HasPrefix(value, "/") {
+		return ""
+	}
+	best := -1
+	for _, marker := range []string{
+		"/cloud-terminal-api",
+		"/admin",
+		"/user",
+		"/mobile",
+		"/chat",
+		"/agent",
+		"/preview",
+		"/shared",
+		"/vendor",
+		"/index.html",
+		"/app.js",
+		"/styles.css",
+	} {
+		idx := strings.Index(value, marker)
+		if idx < 0 {
+			continue
+		}
+		after := idx + len(marker)
+		if after != len(value) && value[after] != '/' {
+			continue
+		}
+		if best == -1 || idx < best {
+			best = idx
+		}
+	}
+	if best > 0 {
+		return cleanExternalPrefix(value[:best])
+	}
+	return ""
+}
+
+func cleanExternalPrefix(prefix string) string {
+	prefix = strings.TrimSpace(prefix)
+	if prefix == "" || prefix == "/" {
+		return ""
+	}
+	if !strings.HasPrefix(prefix, "/") || strings.HasPrefix(prefix, "//") || strings.HasPrefix(prefix, "/\\") {
+		return ""
+	}
+	prefix = pathpkg.Clean(prefix)
+	if prefix == "." || prefix == "/" {
+		return ""
+	}
+	return strings.TrimRight(prefix, "/")
+}
+
+func joinURLPath(prefix, target string) string {
+	prefix = strings.TrimRight(prefix, "/")
+	if prefix == "" {
+		return target
+	}
+	return prefix + "/" + strings.TrimLeft(target, "/")
 }
 
 func (s *Server) serveRoot(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/" {
-		http.Redirect(w, r, "/mobile/", http.StatusFound)
+		s.redirectExternal(w, r, "/mobile/", http.StatusFound)
 		return
 	}
-	http.FileServer(http.FS(s.staticFS)).ServeHTTP(w, r)
+	http.NotFound(w, r)
 }
 
 func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
@@ -196,6 +462,7 @@ func (s *Server) discoveryGateway(w http.ResponseWriter, r *http.Request) {
 	if gatewayURL == "" {
 		gatewayURL = inferGatewayURL(r)
 	}
+	gatewayURL = normalizeBaseURL(gatewayURL)
 	writeJSON(w, http.StatusOK, map[string]string{
 		"gateway_url": gatewayURL,
 		"tunnel_path": "/cloud-terminal-api/tunnel/agent",
@@ -220,7 +487,11 @@ func inferGatewayURL(r *http.Request) string {
 	if host == "" {
 		return ""
 	}
-	return scheme + "://" + host
+	base := scheme + "://" + host
+	if prefix := forwardedPathPrefix(r); prefix != "" {
+		base += prefix
+	}
+	return base
 }
 
 func (s *Server) handleTunnelSessionMessage(msg workbenchServerMessage) {
@@ -246,13 +517,28 @@ func (s *Server) edgeInfo(w http.ResponseWriter, r *http.Request) {
 	account, _ := s.accountFromRequest(r)
 	cfg := s.config.Snapshot()
 	policyCfg := s.policyForAccount(account, cfg.Policy)
-	writeJSON(w, http.StatusOK, map[string]any{
+	status, lastSeen := s.edgeStatus(account)
+	payload := map[string]any{
 		"id":       s.edgeID,
 		"name":     s.edgeName,
-		"status":   "online",
+		"status":   status,
 		"commands": s.commandCompletionsForAccount(account),
 		"work_dir": defaultWorkbenchPath(cfg.Edge.WorkDir, policyCfg.AllowPaths, policyCfg.RequirePathMatch),
-	})
+	}
+	if !lastSeen.IsZero() {
+		payload["last_seen"] = formatTime(lastSeen)
+	}
+	writeJSON(w, http.StatusOK, payload)
+}
+
+// edgeStatus returns the tri-state ("online" | "reconnecting" | "offline") and
+// last-seen timestamp for the given account. For local-runtime (non-tunnel)
+// deployments it always reports online.
+func (s *Server) edgeStatus(account string) (string, time.Time) {
+	if !s.runtimeIsTunnel() {
+		return "online", time.Time{}
+	}
+	return s.tunnel.statusForAccount(account)
 }
 
 func (s *Server) complete(w http.ResponseWriter, r *http.Request) {
@@ -635,6 +921,13 @@ func (s *Server) tunnelAgentWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	const tunnelReadTimeout = 60 * time.Second
+	const tunnelPingInterval = 25 * time.Second
+	_ = conn.SetReadDeadline(time.Now().Add(tunnelReadTimeout))
+	conn.SetPongHandler(func(string) error {
+		return conn.SetReadDeadline(time.Now().Add(tunnelReadTimeout))
+	})
+
 	var helloEnv tunnelEnvelope
 	if err := conn.ReadJSON(&helloEnv); err != nil {
 		_ = conn.Close()
@@ -673,22 +966,61 @@ func (s *Server) tunnelAgentWS(w http.ResponseWriter, r *http.Request) {
 		sessions:     slices.Clone(hello.Sessions),
 		pending:      make(map[string]chan tunnelEnvelope),
 		exitWaiters:  make(map[string]chan workbenchServerMessage),
+		lastSeen:     time.Now(),
+		pinger:       make(chan struct{}),
 	}
 	client.sessionSink = s.handleTunnelSessionMessage
-	if existing := s.tunnel.currentForAccount(account); existing != nil && existing != client {
-		s.logger.Warn("reject duplicate agent tunnel", "account", account, "edge_id", hello.EdgeID, "existing_edge_id", existing.edgeID)
-		_ = conn.WriteJSON(tunnelEnvelope{
-			Type:  "error",
-			Code:  "already_connected",
-			Error: "another agent for this account is already connected to the gateway",
-		})
-		_ = conn.Close()
-		return
+
+	// Reconcile against any prior client for this account. cancelGrace returns
+	// the grace-period snapshot if one exists; otherwise we fall back to the
+	// currently-online client (which is about to be superseded by hub.set).
+	prior := s.tunnel.cancelGrace(account)
+	if prior == nil {
+		prior = s.tunnel.currentForAccount(account)
 	}
+	if prior != nil && prior != client {
+		failed := client.restoreFromPrevious(prior)
+		for _, sess := range failed {
+			s.handleTunnelSessionMessage(workbenchServerMessage{
+				Type:      "exit",
+				SessionID: sess.ID,
+				ExitCode:  1,
+				Error:     "tunnel disconnected before reconnect",
+				WorkDir:   sess.WorkDir,
+				Running:   false,
+			})
+		}
+	}
+
 	s.tunnel.set(client)
 	_ = client.write(tunnelEnvelope{Type: "hello_ack", OK: true})
-	s.logger.Info("edge agent tunnel connected", "edge_id", client.edgeID, "edge_name", client.edgeName)
+	s.logger.Info("edge agent tunnel connected",
+		"edge_id", client.edgeID,
+		"edge_name", client.edgeName,
+		"resume", hello.Resume,
+		"took_over", prior != nil)
+
+	go s.tunnelPingLoop(conn, client, tunnelPingInterval)
 	client.readLoop()
+}
+
+func (s *Server) tunnelPingLoop(conn *websocket.Conn, client *tunnelClient, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-client.pinger:
+			return
+		case <-ticker.C:
+			client.writeMu.Lock()
+			_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+			err := conn.WriteMessage(websocket.PingMessage, nil)
+			client.writeMu.Unlock()
+			if err != nil {
+				return
+			}
+		}
+	}
 }
 
 func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
@@ -737,7 +1069,7 @@ func (s *Server) withAdminStatic(next http.Handler) http.Handler {
 		}
 		if r.URL.Path == "/admin/" || r.URL.Path == "/admin/index.html" {
 			if identity, ok := s.accountIdentityFromRequest(r); !ok || identity.Role != accountRoleAdmin {
-				http.Redirect(w, r, "/admin/login.html", http.StatusFound)
+				s.redirectExternal(w, r, "/admin/login.html", http.StatusFound)
 				return
 			}
 		}
@@ -748,12 +1080,14 @@ func (s *Server) withAdminStatic(next http.Handler) http.Handler {
 func (s *Server) withUserStatic(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/user/login.html", "/user/login.js", "/user/styles.css", "/user/app.js":
+		case "/user/login.html", "/user/login.js", "/user/styles.css", "/user/app.js",
+			"/user/verified.html", "/user/reset.html", "/user/reset.js",
+			"/user/oauth_bind.html", "/user/oauth_bind.js":
 			next.ServeHTTP(w, r)
 			return
 		}
 		if _, ok := s.accountIdentityFromRequest(r); !ok {
-			http.Redirect(w, r, "/user/login.html", http.StatusFound)
+			s.redirectExternal(w, r, "/user/login.html", http.StatusFound)
 			return
 		}
 		next.ServeHTTP(w, r)
@@ -1010,6 +1344,57 @@ func (s *Server) adminAccounts(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (s *Server) adminAccountManage(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", "POST")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var payload struct {
+		Action   string `json:"action"`
+		Username string `json:"username"`
+		Password string `json:"password,omitempty"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	target := strings.TrimSpace(strings.ToLower(payload.Username))
+	if target == "" {
+		http.Error(w, "username is required", http.StatusBadRequest)
+		return
+	}
+	identity, _ := s.accountIdentityFromRequest(r)
+	caller := strings.TrimSpace(strings.ToLower(identity.Username))
+	switch payload.Action {
+	case "disable":
+		if caller != "" && caller == target {
+			http.Error(w, "cannot disable your own account", http.StatusBadRequest)
+			return
+		}
+		if err := s.accountStore().SetAccountDisabled(target, true); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+	case "enable":
+		if err := s.accountStore().SetAccountDisabled(target, false); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+	case "reset_password":
+		if err := s.accountStore().AdminResetPassword(target, payload.Password); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+	default:
+		http.Error(w, "unsupported action", http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"accounts": s.accountStore().List(),
+	})
+}
+
 func (s *Server) userSettings(w http.ResponseWriter, r *http.Request) {
 	identity, ok := s.accountIdentityFromRequest(r)
 	if !ok {
@@ -1039,6 +1424,58 @@ func (s *Server) userSettings(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, userSettingsToPayload(settings, accountPublicInfo{Username: identity.Username, Role: identity.Role}, cfg.Policy, cfg.CloudTunnel.GatewayURL))
 	default:
 		w.Header().Set("Allow", "GET, PUT")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) userArchive(w http.ResponseWriter, r *http.Request) {
+	identity, ok := s.accountIdentityFromRequest(r)
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	cfg := s.config.Snapshot()
+	switch r.Method {
+	case http.MethodPut:
+		var payload userArchiveUpdatePayload
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		settings, err := s.accountStore().UpdateUserArchive(identity.Username, payload, cfg.Policy)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, http.StatusOK, userSettingsToPayload(settings, accountPublicInfo{Username: identity.Username, Role: identity.Role}, cfg.Policy, cfg.CloudTunnel.GatewayURL))
+	default:
+		w.Header().Set("Allow", "PUT")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) userQuickCommands(w http.ResponseWriter, r *http.Request) {
+	identity, ok := s.accountIdentityFromRequest(r)
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	cfg := s.config.Snapshot()
+	switch r.Method {
+	case http.MethodPut:
+		var payload userQuickCommandsUpdatePayload
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		settings, err := s.accountStore().UpdateUserQuickCommands(identity.Username, payload, cfg.Policy)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, http.StatusOK, userSettingsToPayload(settings, accountPublicInfo{Username: identity.Username, Role: identity.Role}, cfg.Policy, cfg.CloudTunnel.GatewayURL))
+	default:
+		w.Header().Set("Allow", "PUT")
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
 }

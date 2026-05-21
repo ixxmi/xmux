@@ -1,4 +1,5 @@
 /cloud-terminal
+/.xmux/
 /data/*.jsonl
 /data/*.db
 /.DS_Store

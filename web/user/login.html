@@ -4,23 +4,73 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>xmux User</title>
-    <link rel="stylesheet" href="/user/styles.css" />
+    <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
     <main class="login-shell">
-      <form id="loginForm" class="login-box">
+      <div class="login-box">
         <div class="login-mark">xm</div>
         <h1>xmux</h1>
         <p class="login-subtitle">用户后台</p>
-        <label>账号<input id="usernameInput" autocomplete="username" placeholder="用户名或邮箱" /></label>
-        <label>密码<input id="passwordInput" type="password" autocomplete="current-password" placeholder="账号密码" /></label>
-        <div class="login-actions">
-          <button type="submit">登录</button>
-          <button id="registerButton" class="secondary" type="button">注册</button>
+
+        <div class="login-tabs" id="loginTabs">
+          <button class="login-tab active" type="button" data-tab="login">登录</button>
+          <button class="login-tab" type="button" data-tab="register">注册</button>
         </div>
-        <p id="loginMessage" class="login-message"></p>
-      </form>
+
+        <form id="loginForm" class="login-pane active" data-pane="login">
+          <label>账号<input id="usernameInput" autocomplete="username" placeholder="用户名或邮箱" /></label>
+          <label>密码<input id="passwordInput" type="password" autocomplete="current-password" placeholder="账号密码" /></label>
+          <div class="login-actions">
+            <button type="submit">登录</button>
+            <button id="googleLoginButton" class="secondary google-button" type="button" hidden>使用 Google 登录</button>
+          </div>
+          <div class="login-aux">
+            <a href="#" class="login-link" data-tab="forgot">忘记密码？</a>
+          </div>
+          <p id="loginMessage" class="login-message"></p>
+        </form>
+
+        <form id="registerForm" class="login-pane" data-pane="register" hidden>
+          <label>账号<input id="regUsername" autocomplete="username" placeholder="用户名" /></label>
+          <label id="regEmailLabel">邮箱
+            <div class="email-row">
+              <input id="regEmail" type="email" autocomplete="email" placeholder="you@example.com" />
+              <button id="regSendCodeButton" class="secondary" type="button">发送验证码</button>
+            </div>
+          </label>
+          <label id="regCodeLabel">验证码<input id="regCode" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="6 位数字验证码" /></label>
+          <label>密码<input id="regPassword" type="password" autocomplete="new-password" placeholder="按策略设置" /></label>
+          <p id="regHint" class="login-hint"></p>
+          <div class="login-actions">
+            <button type="submit">注册</button>
+          </div>
+          <p id="regMessage" class="login-message"></p>
+        </form>
+
+        <form id="forgotForm" class="login-pane" data-pane="forgot" hidden>
+          <label>邮箱<input id="forgotEmail" type="email" autocomplete="email" placeholder="注册时使用的邮箱" /></label>
+          <div class="login-actions">
+            <button type="submit">发送重置链接</button>
+          </div>
+          <div class="login-aux">
+            <a href="#" class="login-link" data-tab="login">返回登录</a>
+          </div>
+          <p id="forgotMessage" class="login-message"></p>
+        </form>
+
+        <div id="emailFixupPane" class="login-pane" data-pane="emailFixup" hidden>
+          <p class="login-hint">请补填邮箱以完成账户升级，系统将发送验证邮件。</p>
+          <label>邮箱<input id="fixupEmail" type="email" autocomplete="email" placeholder="you@example.com" /></label>
+          <div class="login-actions">
+            <button id="fixupSubmit" type="button">提交</button>
+            <button id="fixupCancel" class="secondary" type="button">取消</button>
+          </div>
+          <p id="fixupMessage" class="login-message"></p>
+        </div>
+      </div>
     </main>
-    <script src="/user/login.js"></script>
+    <script src="../shared/path.js"></script>
+    <script src="login.js"></script>
   </body>
 </html>

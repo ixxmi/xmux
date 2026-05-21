@@ -5,6 +5,7 @@ const state = {
   selectedCommand: "",
   account: null
 };
+const appPath = window.XMuxPath?.path || ((path) => path);
 
 const els = {
   saveState: document.getElementById("saveState"),
@@ -248,11 +249,11 @@ function cleanProfileError(value) {
 async function logout() {
   closeAccountDropdown();
   try {
-    await fetch("/cloud-terminal-api/accounts/logout", { method: "POST", credentials: "same-origin" });
+    await fetch(appPath("/cloud-terminal-api/accounts/logout"), { method: "POST", credentials: "same-origin" });
   } catch {
     // ignore network errors and continue to redirect
   }
-  window.location.href = "/admin/login.html";
+  window.location.href = appPath("/admin/login.html");
 }
 
 async function loadConfig() {
@@ -261,6 +262,7 @@ async function loadConfig() {
   renderConfig();
   await loadAccounts();
   await loadFS("/");
+  await loadAuthSettings();
 }
 
 function switchSection(section) {
@@ -427,11 +429,91 @@ function renderAccounts(accounts) {
     els.accountList.innerHTML = `<div class="empty-state small">还没有云账号。</div>`;
     return;
   }
+  const selfUsername = (state.account?.username || "").toLowerCase();
   for (const account of accounts) {
+    const username = String(account.username || "").toLowerCase();
+    const isSelf = username && username === selfUsername;
+    const disabled = !!account.disabled;
     const row = document.createElement("div");
     row.className = "account-row";
-    row.innerHTML = `<strong>${escapeText(account.username)}</strong><span>${escapeText(account.role || "user")} · ${escapeText(account.last_login_at || account.created_at || "")}</span>`;
+    const statusBadge = disabled ? `<span class="badge danger">已停用</span>` : "";
+    const lastSeen = escapeText(account.last_login_at || account.created_at || "");
+    row.innerHTML = `
+      <div class="account-row-main">
+        <strong>${escapeText(account.username)}</strong>
+        <span>${escapeText(account.role || "user")} · ${lastSeen}</span>
+      </div>
+      <div class="account-row-actions">
+        ${statusBadge}
+        <button type="button" class="ghost" data-action="reset">重置密码</button>
+        <button type="button" class="ghost" data-action="${disabled ? "enable" : "disable"}" ${isSelf && !disabled ? "disabled title=\"不能停用自己\"" : ""}>${disabled ? "启用" : "停用"}</button>
+      </div>
+    `;
+    row.querySelectorAll("button[data-action]").forEach((btn) => {
+      btn.addEventListener("click", () => handleAccountAction(account, btn.dataset.action));
+    });
     els.accountList.appendChild(row);
+  }
+}
+
+async function handleAccountAction(account, action) {
+  if (!account || !account.username) {
+    return;
+  }
+  const username = account.username;
+  let payload = { action, username };
+  if (action === "disable") {
+    const ok = await XDialog.confirm(`停用账号「${username}」？停用后该账号的所有会话会被立即失效。`, {
+      title: "停用账号",
+      okText: "停用",
+      danger: true,
+    });
+    if (!ok) {
+      return;
+    }
+  } else if (action === "enable") {
+    const ok = await XDialog.confirm(`启用账号「${username}」？`, {
+      title: "启用账号",
+      okText: "启用",
+    });
+    if (!ok) {
+      return;
+    }
+  } else if (action === "reset") {
+    const next = await XDialog.prompt(`为账号「${username}」设置新密码（需符合密码策略）：`, "", {
+      title: "重置密码",
+      okText: "重置",
+    });
+    if (next === null) {
+      return;
+    }
+    const trimmed = next.trim();
+    if (!trimmed) {
+      els.saveState.textContent = "密码不能为空";
+      return;
+    }
+    payload = { action: "reset_password", username, password: trimmed };
+  } else {
+    return;
+  }
+  try {
+    els.saveState.textContent = action === "reset" ? "重置密码中..." : "更新中...";
+    const response = await api("/cloud-terminal-api/admin/accounts/manage", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+    const data = await response.json();
+    renderAccounts(data.accounts || []);
+    if (action === "reset") {
+      els.saveState.textContent = `已为 ${username} 重置密码，原会话已下线`;
+    } else if (action === "disable") {
+      els.saveState.textContent = `已停用 ${username}`;
+    } else {
+      els.saveState.textContent = `已启用 ${username}`;
+    }
+  } catch (error) {
+    els.saveState.textContent = error.message;
   }
 }
 
@@ -563,9 +645,9 @@ function switchCommandTab(tab) {
 
 async function api(path, options = {}) {
   const headers = new Headers(options.headers || {});
-  const response = await fetch(path, { ...options, headers });
+  const response = await fetch(appPath(path), { ...options, headers });
   if (response.status === 401 || response.status === 403) {
-    window.location.href = "/admin/login.html";
+    window.location.href = appPath("/admin/login.html");
     throw new Error("Unauthorized");
   }
   if (!response.ok) {
@@ -602,4 +684,246 @@ function formatBytes(bytes) {
     unit += 1;
   }
   return `${value >= 10 || unit === 0 ? Math.round(value) : value.toFixed(1)} ${units[unit]}`;
+}
+
+// ---------------- Auth / SMTP / OAuth settings ----------------
+
+const authEls = {
+  pwdMinLength: document.getElementById("pwdMinLength"),
+  pwdRequireUpper: document.getElementById("pwdRequireUpper"),
+  pwdRequireLower: document.getElementById("pwdRequireLower"),
+  pwdRequireDigit: document.getElementById("pwdRequireDigit"),
+  pwdRequireSymbol: document.getElementById("pwdRequireSymbol"),
+  pwdDenyCommon: document.getElementById("pwdDenyCommon"),
+  authRequireEmailOnRegister: document.getElementById("authRequireEmailOnRegister"),
+  authRequireEmailVerifiedToLogin: document.getElementById("authRequireEmailVerifiedToLogin"),
+  authOAuthGoogleEnabled: document.getElementById("authOAuthGoogleEnabled"),
+  authOAuthGoogleAutoRegister: document.getElementById("authOAuthGoogleAutoRegister"),
+  authAppBaseURL: document.getElementById("authAppBaseURL"),
+  saveAuthSettings: document.getElementById("saveAuthSettings"),
+  authSaveState: document.getElementById("authSaveState"),
+  smtpEnabled: document.getElementById("smtpEnabled"),
+  smtpHost: document.getElementById("smtpHost"),
+  smtpPort: document.getElementById("smtpPort"),
+  smtpUsername: document.getElementById("smtpUsername"),
+  smtpPassword: document.getElementById("smtpPassword"),
+  smtpFromAddress: document.getElementById("smtpFromAddress"),
+  smtpFromName: document.getElementById("smtpFromName"),
+  smtpStartTLS: document.getElementById("smtpStartTLS"),
+  smtpSMTPS: document.getElementById("smtpSMTPS"),
+  smtpSkipVerify: document.getElementById("smtpSkipVerify"),
+  saveSMTPSettings: document.getElementById("saveSMTPSettings"),
+  smtpStatus: document.getElementById("smtpStatus"),
+  oauthGoogleEnabled: document.getElementById("oauthGoogleEnabled"),
+  oauthGoogleClientID: document.getElementById("oauthGoogleClientID"),
+  oauthGoogleClientSecret: document.getElementById("oauthGoogleClientSecret"),
+  oauthGoogleRedirectURL: document.getElementById("oauthGoogleRedirectURL"),
+  oauthGoogleHostedDomain: document.getElementById("oauthGoogleHostedDomain"),
+  oauthGoogleLinkExistingMode: document.getElementById("oauthGoogleLinkExistingMode"),
+  saveOAuthGoogleSettings: document.getElementById("saveOAuthGoogleSettings"),
+  oauthGoogleStatus: document.getElementById("oauthGoogleStatus"),
+  smtpTestTo: document.getElementById("smtpTestTo"),
+  testSMTP: document.getElementById("testSMTP"),
+  smtpTestResult: document.getElementById("smtpTestResult"),
+};
+
+async function loadAuthSettings() {
+  if (!authEls.saveAuthSettings) return;
+  try {
+    const [auth, smtp, oauth] = await Promise.all([
+      api("/cloud-terminal-api/admin/auth-settings").then((r) => r.json()),
+      api("/cloud-terminal-api/admin/smtp-settings").then((r) => r.json()),
+      api("/cloud-terminal-api/admin/oauth-settings/google").then((r) => r.json()),
+    ]);
+    fillAuthForm(auth);
+    fillSMTPForm(smtp);
+    fillOAuthGoogleForm(oauth);
+  } catch (err) {
+    console.warn("loadAuthSettings", err);
+  }
+}
+
+function fillAuthForm(auth) {
+  if (!auth) return;
+  const pwd = auth.password_policy || {};
+  const policy = auth.auth_settings || {};
+  authEls.pwdMinLength.value = pwd.min_length || 10;
+  authEls.pwdRequireUpper.checked = !!pwd.require_upper;
+  authEls.pwdRequireLower.checked = !!pwd.require_lower;
+  authEls.pwdRequireDigit.checked = !!pwd.require_digit;
+  authEls.pwdRequireSymbol.checked = !!pwd.require_symbol;
+  authEls.pwdDenyCommon.checked = !!pwd.deny_common;
+  authEls.authRequireEmailOnRegister.checked = !!policy.require_email_on_register;
+  authEls.authRequireEmailVerifiedToLogin.checked = !!policy.require_email_verified_to_login;
+  authEls.authOAuthGoogleEnabled.checked = !!policy.oauth_google_enabled;
+  authEls.authOAuthGoogleAutoRegister.checked = !!policy.oauth_google_auto_register;
+  authEls.authAppBaseURL.value = auth.app_base_url || "";
+  authEls.authSaveState.textContent = "已加载";
+}
+
+function fillSMTPForm(smtp) {
+  if (!smtp) return;
+  authEls.smtpEnabled.checked = !!smtp.enabled;
+  authEls.smtpHost.value = smtp.host || "";
+  authEls.smtpPort.value = smtp.port || 587;
+  authEls.smtpUsername.value = smtp.username || "";
+  authEls.smtpPassword.value = "";
+  authEls.smtpFromAddress.value = smtp.from_address || "";
+  authEls.smtpFromName.value = smtp.from_name || "";
+  authEls.smtpStartTLS.checked = !!smtp.use_starttls;
+  authEls.smtpSMTPS.checked = !!smtp.use_smtps;
+  authEls.smtpSkipVerify.checked = !!smtp.skip_tls_verify;
+  authEls.smtpStatus.textContent = smtp.password_set ? "已配置" : "未配置密码";
+}
+
+function fillOAuthGoogleForm(oauth) {
+  if (!oauth) return;
+  authEls.oauthGoogleEnabled.checked = !!oauth.enabled;
+  authEls.oauthGoogleClientID.value = oauth.client_id || "";
+  authEls.oauthGoogleClientSecret.value = "";
+  authEls.oauthGoogleRedirectURL.value = oauth.redirect_url || "";
+  authEls.oauthGoogleHostedDomain.value = oauth.hosted_domain || "";
+  authEls.oauthGoogleLinkExistingMode.value = oauth.link_existing_mode || "require_password";
+  authEls.oauthGoogleStatus.textContent = oauth.client_secret_set ? "已配置" : "未配置 secret";
+}
+
+async function saveAuthSettings() {
+  const payload = {
+    password_policy: {
+      min_length: parseInt(authEls.pwdMinLength.value, 10) || 10,
+      require_upper: authEls.pwdRequireUpper.checked,
+      require_lower: authEls.pwdRequireLower.checked,
+      require_digit: authEls.pwdRequireDigit.checked,
+      require_symbol: authEls.pwdRequireSymbol.checked,
+      deny_common: authEls.pwdDenyCommon.checked,
+      max_length: 128,
+    },
+    auth_settings: {
+      require_email_on_register: authEls.authRequireEmailOnRegister.checked,
+      require_email_verified_to_login: authEls.authRequireEmailVerifiedToLogin.checked,
+      oauth_google_enabled: authEls.authOAuthGoogleEnabled.checked,
+      oauth_google_auto_register: authEls.authOAuthGoogleAutoRegister.checked,
+    },
+    app_base_url: authEls.authAppBaseURL.value.trim(),
+  };
+  authEls.authSaveState.textContent = "保存中…";
+  try {
+    const resp = await api("/cloud-terminal-api/admin/auth-settings", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!resp.ok) {
+      throw new Error(await resp.text());
+    }
+    fillAuthForm(await resp.json());
+    authEls.authSaveState.textContent = "已保存";
+  } catch (err) {
+    authEls.authSaveState.textContent = "保存失败：" + err.message;
+  }
+}
+
+async function saveSMTPSettings() {
+  const payload = {
+    enabled: authEls.smtpEnabled.checked,
+    host: authEls.smtpHost.value.trim(),
+    port: parseInt(authEls.smtpPort.value, 10) || 0,
+    username: authEls.smtpUsername.value.trim(),
+    password: authEls.smtpPassword.value,
+    from_address: authEls.smtpFromAddress.value.trim(),
+    from_name: authEls.smtpFromName.value.trim(),
+    use_starttls: authEls.smtpStartTLS.checked,
+    use_smtps: authEls.smtpSMTPS.checked,
+    skip_tls_verify: authEls.smtpSkipVerify.checked,
+  };
+  authEls.smtpStatus.textContent = "保存中…";
+  try {
+    const resp = await api("/cloud-terminal-api/admin/smtp-settings", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!resp.ok) {
+      throw new Error(await resp.text());
+    }
+    fillSMTPForm(await resp.json());
+  } catch (err) {
+    authEls.smtpStatus.textContent = "保存失败：" + err.message;
+  }
+}
+
+async function saveOAuthGoogleSettings() {
+  const payload = {
+    enabled: authEls.oauthGoogleEnabled.checked,
+    client_id: authEls.oauthGoogleClientID.value.trim(),
+    client_secret: authEls.oauthGoogleClientSecret.value,
+    redirect_url: authEls.oauthGoogleRedirectURL.value.trim(),
+    hosted_domain: authEls.oauthGoogleHostedDomain.value.trim(),
+    link_existing_mode: authEls.oauthGoogleLinkExistingMode.value,
+  };
+  authEls.oauthGoogleStatus.textContent = "保存中…";
+  try {
+    const resp = await api("/cloud-terminal-api/admin/oauth-settings/google", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!resp.ok) {
+      throw new Error(await resp.text());
+    }
+    fillOAuthGoogleForm(await resp.json());
+  } catch (err) {
+    authEls.oauthGoogleStatus.textContent = "保存失败：" + err.message;
+  }
+}
+
+if (authEls.saveAuthSettings) {
+  authEls.saveAuthSettings.addEventListener("click", saveAuthSettings);
+}
+if (authEls.saveSMTPSettings) {
+  authEls.saveSMTPSettings.addEventListener("click", saveSMTPSettings);
+}
+if (authEls.saveOAuthGoogleSettings) {
+  authEls.saveOAuthGoogleSettings.addEventListener("click", saveOAuthGoogleSettings);
+}
+if (authEls.testSMTP) {
+  authEls.testSMTP.addEventListener("click", async () => {
+    const to = (authEls.smtpTestTo.value || "").trim();
+    if (!to) {
+      authEls.smtpTestResult.textContent = "请填写测试收件邮箱";
+      authEls.smtpTestResult.classList.remove("ok", "fail");
+      return;
+    }
+    authEls.smtpTestResult.textContent = "发送中...";
+    authEls.smtpTestResult.classList.remove("ok", "fail");
+    try {
+      const resp = await api("/cloud-terminal-api/admin/smtp-settings/test", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ to }),
+      });
+      let data = null;
+      try {
+        data = await resp.json();
+      } catch (_) {
+        data = null;
+      }
+      if (!resp.ok && !data) {
+        throw new Error(`HTTP ${resp.status}`);
+      }
+      const meta = data && data.sender_kind ? ` · sender=${data.sender_kind}` : "";
+      const took = data && Number.isFinite(data.took_ms) ? ` · ${data.took_ms}ms` : "";
+      if (data && data.ok) {
+        authEls.smtpTestResult.textContent = `✓ ${data.message || "测试邮件已发送"}${meta}${took}`;
+        authEls.smtpTestResult.classList.add("ok");
+      } else {
+        const reason = (data && data.error) || `HTTP ${resp.status}`;
+        authEls.smtpTestResult.textContent = `✗ 发送失败：${reason}${meta}${took}`;
+        authEls.smtpTestResult.classList.add("fail");
+      }
+    } catch (err) {
+      authEls.smtpTestResult.textContent = "✗ 失败：" + (err.message || String(err));
+      authEls.smtpTestResult.classList.add("fail");
+    }
+  });
 }
